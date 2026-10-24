@@ -22,8 +22,8 @@ export function ChatDetailsProcessRow(props: {
   const title = () => (props.hoverDescription ? description() : undefined);
   const content = () => (
     <>
-      <span class="chat-details__process-icon" data-status={props.row.status} aria-hidden="true">
-        <Icon name="terminal" />
+      <span class="chat-details-processes__icon" aria-hidden="true">
+        <Icon name="squareTerminal" />
         <span class="chat-details-processes__badge" data-status={props.row.status}>
           <span class="chat-details-processes__spinner" />
         </span>

@@ -51,49 +51,47 @@ export function ChatDetailsMobileProcesses(props: ChatDetailsMobileProcessesProp
               <h3 class="chat-details-mobile-root__heading">
                 {t("chat.sessionDetails.processes")}
               </h3>
-              <div class="chat-details-mobile-root__group">
-                <div class="chat-details-mobile-processes">
-                  <Show when={props.data.errorKind !== "read" && props.data.error}>
-                    <div class="chat-details-mobile-processes__error" role="alert">
-                      <span>{props.data.error}</span>
-                      <button
-                        type="button"
-                        class="chip"
-                        disabled={!props.presented || props.data.loading}
-                        onClick={() => void props.data.refresh()}
-                      >
-                        {t("common.retry")}
-                      </button>
-                    </div>
-                  </Show>
-                  <div role="list" aria-label={t("chat.sessionDetails.processes")}>
-                    <For each={visibleRows()} keyed={(row) => row.instanceId}>
-                      {(row) => (
-                        <ChatDetailsProcessRow
-                          presentation={props.data.presentation}
-                          row={row()}
-                          elementRef={motion.row}
-                          disabled={!props.presented}
-                          onOpen={props.onOpen}
-                        />
-                      )}
-                    </For>
-                  </div>
-                  <Show when={props.onOpen}>
+              <div class="chat-details-mobile-root__group chat-details-mobile-processes">
+                <Show when={props.data.errorKind !== "read" && props.data.error}>
+                  <div class="chat-details-mobile-processes__error" role="alert">
+                    <span>{props.data.error}</span>
                     <button
                       type="button"
-                      class="chat-details-mobile-root__entry chat-details-mobile-processes__show-all"
-                      disabled={!props.presented}
-                      onClick={() => props.onOpen?.()}
+                      class="chip"
+                      disabled={!props.presented || props.data.loading}
+                      onClick={() => void props.data.refresh()}
                     >
-                      <span class="chat-details-mobile-root__copy">
-                        {hidden() > 0
-                          ? t("chat.sessionDetails.showMore", { count: String(hidden()) })
-                          : t("chat.processesPanel.viewAll")}
-                      </span>
+                      {t("common.retry")}
                     </button>
-                  </Show>
+                  </div>
+                </Show>
+                <div role="list" aria-label={t("chat.sessionDetails.processes")}>
+                  <For each={visibleRows()} keyed={(row) => row.instanceId}>
+                    {(row) => (
+                      <ChatDetailsProcessRow
+                        presentation={props.data.presentation}
+                        row={row()}
+                        elementRef={motion.row}
+                        disabled={!props.presented}
+                        onOpen={props.onOpen}
+                      />
+                    )}
+                  </For>
                 </div>
+                <Show when={props.onOpen}>
+                  <button
+                    type="button"
+                    class="chat-details-mobile-root__entry chat-details-mobile-processes__show-all"
+                    disabled={!props.presented}
+                    onClick={() => props.onOpen?.()}
+                  >
+                    <span class="chat-details-mobile-root__copy">
+                      {hidden() > 0
+                        ? t("chat.sessionDetails.showMore", { count: String(hidden()) })
+                        : t("chat.processesPanel.viewAll")}
+                    </span>
+                  </button>
+                </Show>
               </div>
             </section>
           </Show>
