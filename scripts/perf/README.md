@@ -4593,6 +4593,18 @@ The coordinator preserves guard/start/load metadata and rejects failed pairs.
 paired means, signed absolute/relative deltas, raw sample counts and settled
 retention families. It does not decide the campaign's acceptance gates.
 
+A sequential campaign can retain one slot lock across pairs. Its parent opens
+and exclusively locks the selected slot file, adds `--lock-fd <descriptor>` to
+each pair command, and passes that descriptor through Python's
+`subprocess.run(..., pass_fds=(lock.fileno(),), check=True)`. The pair runner
+duplicates the inherited descriptor, verifies its device/inode against the
+selected slot file, and still calls `flock(LOCK_EX)` on that shared open file
+description. Each pair retains its own guard wait/watch and swapped CPU sides.
+Generate only the next pair's two fixtures sequentially; after a successful
+pair preserve its result/profile artifacts and delete only its fixture state
+before generating the next pair. Abort the campaign and close the parent lock
+on any invalid pair or guard failure, preserving the failed pair for diagnosis.
+
 The other side uses a separate fixture, output and loopback port, the same
 `--sync` prefix, and `--side fix`. Each side writes
 `<prefix>.wave-0.<side>.ready` after its measured Gateway and writer socket are

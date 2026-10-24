@@ -7,6 +7,7 @@ p.add_argument('--checkout',required=True,type=Path)
 p.add_argument('--root',required=True,type=Path)
 p.add_argument('--pair',required=True,type=int)
 p.add_argument('--slot',choices=['a','b'],default='b')
+p.add_argument('--lock-fd',type=int,help='Inherit campaign custody of the selected slot lock')
 p.add_argument('--base-entry',required=True,type=Path)
 p.add_argument('--fix-entry',required=True,type=Path)
 p.add_argument('--retention',action='store_true')
@@ -16,7 +17,10 @@ assert a.pair>=1
 for side in ['base','fix']: assert (a.root/side/'state/team-shape-summary.json').is_file()
 assert not any((a.root/side/'output').exists() for side in ['base','fix'])
 guard='/srv/perf-sandbox/slot-b-guard.sh'
-lock=Path('/srv/perf-sandbox/.quiet.lock' if a.slot=='a' else '/srv/perf-sandbox/.quiet-b.lock').open('a')
+lock_path=Path('/srv/perf-sandbox/.quiet.lock' if a.slot=='a' else '/srv/perf-sandbox/.quiet-b.lock')
+lock=lock_path.open('a') if a.lock_fd is None else os.fdopen(os.dup(a.lock_fd),'a')
+held=os.fstat(lock.fileno()); expected=lock_path.stat()
+assert (held.st_dev,held.st_ino)==(expected.st_dev,expected.st_ino),'Inherited descriptor must name the selected slot lock'
 fcntl.flock(lock,fcntl.LOCK_EX)
 subprocess.run([guard,'wait'],check=True)
 start=96 if a.slot=='a' else 64
