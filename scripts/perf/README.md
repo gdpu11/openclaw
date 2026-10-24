@@ -4569,7 +4569,7 @@ operator checkout or ship the instrumented build.
 node --enable-source-maps --import ./scripts/tsx.mjs \
   scripts/perf/reconnect-read-wave-measure.ts \
   --root /path/to/fresh-fixture --output /path/to/new-output \
-  --entry /path/to/compiled-dist/entry.js --clients 65 --port 41669 \
+  --entry /path/to/compiled-dist/entry.js --clients 65 --port 62669 \
   --sync /path/to/pair/start --side base
 ```
 
@@ -4585,8 +4585,10 @@ python3 scripts/perf/session-row-churn-pair.py \
 ```
 
 Increment `--pair` for each fresh pair; it swaps launch order and CPU assignment.
-The coordinator uses Gateway ports 41669 and 41679; each side also reserves its
-Gateway port + 1 for the board widget sandbox listener.
+The coordinator reads each Gateway port from its prepared fixture configuration;
+each side also reserves Gateway port + 1 for the board widget sandbox listener.
+Choose distinct ports outside the host's ephemeral range, such as 62669 and 62679
+on the campaign host.
 Use `--retention` with a fresh `retention-1` root for five-wave diagnostics.
 The coordinator preserves guard/start/load metadata and rejects failed pairs.
 `python3 scripts/perf/session-row-churn-summary.py /path/to/results` reports the
