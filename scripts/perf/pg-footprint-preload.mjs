@@ -1,6 +1,6 @@
 // Synthetic Gateway instrumentation: no query bindings, result rows, or task payloads.
 import { createHash } from "node:crypto";
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync, watch } from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import {
@@ -24,9 +24,33 @@ const file = path.join(output, `workers-${process.pid}-${threadId}.jsonl`);
 const record = (event) =>
   appendFileSync(
     file,
-    `${JSON.stringify({ at: Date.now(), pid: process.pid, threadId, ...event })}\n`,
+    `${JSON.stringify({ at: Date.now(), pid: process.pid, parentPid: process.ppid, threadId, ...event })}\n`,
   );
 const phase = () => readFileSync(path.join(output, "phase"), "utf8").trim();
+const children = createRequire(import.meta.url)("node:child_process");
+const nativeSpawn = children.spawn;
+const profileArgs = process.execArgv.filter(
+  (arg) => arg === "--cpu-prof" || arg.startsWith("--cpu-prof-dir="),
+);
+children.spawn = function (command, args, options) {
+  const nodeChild = command === process.execPath;
+  const child = nativeSpawn(
+    command,
+    nodeChild && profileArgs.length && Array.isArray(args)
+      ? [
+          ...profileArgs,
+          "--import",
+          path.resolve("scripts/lib/gateway-bench-cpu-profile.mjs"),
+          ...args,
+        ]
+      : args,
+    options,
+  );
+  if (nodeChild) {
+    record({ type: "child-spawn", childPid: child.pid, phase: phase() });
+  }
+  return child;
+};
 const workers = createRequire(import.meta.url)("node:worker_threads");
 const NativeWorker = workers.Worker;
 workers.Worker = class extends NativeWorker {
@@ -92,15 +116,18 @@ bus.addEventListener("message", ({ data }) => {
   }
 });
 if (threadId === 0) {
-  process.on("message", (data) => {
-    if (data?.type !== "pg-footprint:sample") {
+  let previous;
+  // Native resource children have their own IPC protocol and BroadcastChannel domain.
+  watch(path.join(output, "sample-request"), { persistent: false }, () => {
+    const label = readFileSync(path.join(output, "sample-request"), "utf8").trim();
+    if (!label || label === previous) {
       return;
     }
-    sample(data.sample);
+    previous = label;
+    sample(label);
     // Node BroadcastChannel has no targetOrigin argument.
     // oxlint-disable-next-line unicorn/require-post-message-target-origin
-    bus.postMessage({ type: "sample", sample: data.sample });
+    bus.postMessage({ type: "sample", sample: label });
   });
-  process.channel?.unref();
 }
 record({ type: "start", script });

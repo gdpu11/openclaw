@@ -11,7 +11,9 @@ Count worker launches, live workers, PG bridges, database connections, SQL
 statements and worker requests, by owning worker and phase. Report process RSS
 once per process; isolate heap/external memory may be grouped by owner, but RSS
 must never be summed across workers. PostgreSQL server connections and process
-memory are separate from Gateway memory. Cold startup and post-idle first
+memory are separate from Gateway memory. Sample native resource child processes
+as well as the Gateway; process/thread identity must include both PID and thread
+ID. Cold startup and post-idle first
 requests stay separate from warm requests.
 
 For a candidate, run five interleaved baseline/candidate pairs under the campaign

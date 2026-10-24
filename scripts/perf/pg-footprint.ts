@@ -9,6 +9,7 @@ import {
   readFileSync,
   realpathSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { homedir, loadavg } from "node:os";
 import path from "node:path";
@@ -214,6 +215,8 @@ if (values.mode === "seed") {
   }
   const output = internalPath(values.output, false);
   mkdirSync(output, { mode: 0o700 });
+  const sampleRequest = path.join(output, "sample-request");
+  writeFileSync(sampleRequest, Buffer.alloc(256, " "));
   const observer = process.env.SQLMEASURE_OBSERVER;
   if (!observer || !path.isAbsolute(observer)) {
     throw new Error("SQLMEASURE_OBSERVER must name the frozen observer.cjs");
@@ -224,11 +227,9 @@ if (values.mode === "seed") {
   phase("boot");
   const port = await getFreePort();
   const log = openSync(path.join(output, "gateway.log"), "wx");
-  const extraArgs = [
-    ...gatewayBenchCpuProfileArgs(values.profile ? path.join(output, "profiles") : undefined),
-    "--import",
-    path.resolve("scripts/perf/pg-footprint-preload.mjs"),
-  ];
+  const extraArgs = gatewayBenchCpuProfileArgs(
+    values.profile ? path.join(output, "profiles") : undefined,
+  );
   const started = performance.now();
   const child = spawn(
     process.execPath,
@@ -239,10 +240,10 @@ if (values.mode === "seed") {
         PGFOOTPRINT_OUTPUT: output,
         PGFOOTPRINT_CHANNEL: channel,
         SQLMEASURE_OUT: output,
-        NODE_OPTIONS: `--require=${JSON.stringify(observer)}`,
+        NODE_OPTIONS: `--require=${JSON.stringify(observer)} --import=${JSON.stringify(path.resolve("scripts/perf/pg-footprint-preload.mjs"))}`,
       },
       detached: true,
-      stdio: ["ignore", log, log, "ipc"],
+      stdio: ["ignore", log, log],
     },
   );
   closeSync(log);
@@ -263,6 +264,7 @@ if (values.mode === "seed") {
             (line) =>
               JSON.parse(line) as {
                 type: string;
+                pid: number;
                 threadId: number;
                 workerId?: number;
                 sample?: string;
@@ -272,18 +274,33 @@ if (values.mode === "seed") {
       );
   const sample = async (label: string) => {
     const before = workerEvents();
+    const identity = (pid: number, id: number) => `${pid}:${id}`;
     const parents = new Map(
       before
         .filter((event) => event.type === "spawn")
-        .map((event) => [event.workerId, event.threadId]),
+        .map((event) => [
+          identity(event.pid, event.workerId!),
+          identity(event.pid, event.threadId),
+        ]),
     );
     const retirementCheck = (events: ReturnType<typeof workerEvents>) => {
       const exited = new Set(
-        events.filter((event) => event.type === "exit").map((event) => event.workerId),
+        events
+          .filter((event) => event.type === "exit")
+          .map((event) => identity(event.pid, event.workerId!)),
       );
-      return (id: number) => {
+      return (id: string) => {
+        const pid = Number(id.split(":", 1)[0]);
+        try {
+          process.kill(pid, 0);
+        } catch (error) {
+          if (error instanceof Error && "code" in error && error.code === "ESRCH") {
+            return true;
+          }
+          throw error;
+        }
         for (
-          let current: number | undefined = id;
+          let current: string | undefined = id;
           current !== undefined;
           current = parents.get(current)
         ) {
@@ -297,18 +314,27 @@ if (values.mode === "seed") {
     const wasRetired = retirementCheck(before);
     const expected = new Set(
       before
-        .filter((event) => event.type === "start" && !wasRetired(event.threadId))
-        .map((event) => event.threadId),
+        .filter(
+          (event) => event.type === "start" && !wasRetired(identity(event.pid, event.threadId)),
+        )
+        .map((event) => identity(event.pid, event.threadId)),
     );
-    expected.add(0);
-    child.send({ type: "pg-footprint:sample", sample: label });
+    expected.add(identity(child.pid!, 0));
+    const request = openSync(sampleRequest, "r+");
+    try {
+      const bytes = Buffer.alloc(256, " ");
+      bytes.write(label);
+      writeSync(request, bytes, 0, bytes.length, 0);
+    } finally {
+      closeSync(request);
+    }
     const deadline = performance.now() + 10_000;
     for (;;) {
       const events = workerEvents();
       const settled = new Set(
         events
           .filter((event) => event.type === "sample" && event.sample === label)
-          .map((event) => event.threadId),
+          .map((event) => identity(event.pid, event.threadId)),
       );
       const isRetired = retirementCheck(events);
       for (const id of expected) {
