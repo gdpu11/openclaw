@@ -1,4 +1,5 @@
 import path from "node:path";
+import { expectDefined } from "@openclaw/normalization-core";
 import { expect, it, vi } from "vitest";
 import { observeCronJobCommits } from "../../test/helpers/cron/runtime-mutation.js";
 import { createDueIsolatedJob } from "../../test/helpers/cron/service-regression-fixtures.js";
@@ -337,13 +338,11 @@ it.for([
       const runCommandJob = successfulCommand();
       const { cron, state } = service(storePath, { runCommandJob });
       try {
-        const [request] = await commitCronRunRequests(state, [job], {
+        const requests = await commitCronRunRequests(state, [job], {
           source: "manual",
           mode: "force",
         });
-        if (!request) {
-          throw new Error("Expected the queued cron request");
-        }
+        const request = expectDefined(requests[0], "queued cron request");
         const receiptStatus = () => readReceipt(request.runReceipt.receiptId);
         vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
         await drainCronRunQueue(state);
@@ -414,19 +413,15 @@ it.for(["complete", "cancel", "lost-result"] as const)(
     const job = { ...commandJob("exit-wait"), schedule };
     const unrelated = commandJob("unrelated-wait");
     const storePath = await storeJobs([job, unrelated]);
-    const targetEntered = createDeferred();
-    const unrelatedEntered = createDeferred();
-    const releaseTarget = createDeferred();
-    const releaseUnrelated = createDeferred();
+    const target = gatedCommand();
+    const other = gatedCommand();
     const accepted = createDeferred();
     let targetRuns = 0;
     const runCommandJob = vi.fn(async ({ job: current }: { job: CronJob }) => {
       if (current.id === unrelated.id) {
-        unrelatedEntered.resolve();
-        await releaseUnrelated.promise;
+        await other.runCommandJob();
       } else if (++targetRuns === 1) {
-        targetEntered.resolve();
-        await releaseTarget.promise;
+        await target.runCommandJob();
       }
       return { status: "ok" as const };
     });
@@ -439,9 +434,8 @@ it.for(["complete", "cancel", "lost-result"] as const)(
     try {
       const first = cron.run(job.id, "force");
       void first.catch(() => {});
-      const other = cron.run(unrelated.id, "force");
-      pending.push(first, other);
-      await withinTest(Promise.all([targetEntered.promise, unrelatedEntered.promise]), signal);
+      pending.push(first, cron.run(unrelated.id, "force"));
+      await withinTest(Promise.all([target.entered.promise, other.entered.promise]), signal);
       if (outcome === "lost-result") {
         const execute = stateWorker.executeOpenClawStateWorker;
         const finalization = vi
@@ -467,11 +461,11 @@ it.for(["complete", "cancel", "lost-result"] as const)(
           ran: false,
           reason: "stopped",
         });
-        releaseTarget.resolve();
+        target.release.resolve();
         await withinTest(first, signal);
         expect(targetRuns).toBe(1);
       } else if (outcome === "lost-result") {
-        releaseTarget.resolve();
+        target.release.resolve();
         await expect(withinTest(first, signal)).rejects.toThrow("synthetic terminal write failure");
         await expect(withinTest(exit, signal)).resolves.toMatchObject({
           ok: true,
@@ -480,7 +474,7 @@ it.for(["complete", "cancel", "lost-result"] as const)(
         });
         expect(targetRuns).toBe(1);
       } else {
-        releaseTarget.resolve();
+        target.release.resolve();
         await withinTest(accepted.promise, signal);
         await expect(withinTest(exit, signal)).resolves.toMatchObject({ ok: true, ran: true });
         expect(targetRuns).toBe(2);
@@ -489,8 +483,8 @@ it.for(["complete", "cancel", "lost-result"] as const)(
     } finally {
       controller.abort();
       restoreFinalization?.();
-      releaseTarget.resolve();
-      releaseUnrelated.resolve();
+      target.release.resolve();
+      other.release.resolve();
       await Promise.allSettled(pending);
       await stopServices(cron, sibling);
     }
@@ -756,22 +750,16 @@ it("retires a stale markerless receipt at startup so the job can run again", asy
       "UPDATE cron_jobs SET state_json = json_remove(state_json, '$.runningAtMs', '$.runningReceiptId') WHERE store_key = ? AND job_id = ?",
     ).run(storePath, job.id);
   });
-  const readOldReceipt = () =>
-    runOpenClawStateWriteTransaction(({ db }) =>
-      db
-        .prepare("SELECT receipt_id, status FROM cron_run_receipts WHERE receipt_id = ?")
-        .get(receiptId),
-    );
-  expect(readOldReceipt()).toEqual({ receipt_id: receiptId, status: "running" });
+  expect(readReceipt(receiptId)).toEqual({ status: "running" });
   const runCommandJob = successfulCommand();
   const { cron } = service(storePath, { runCommandJob });
   try {
     await cron.start();
-    expect(readOldReceipt()).toEqual({ receipt_id: receiptId, status: "interrupted" });
+    expect(readReceipt(receiptId)).toEqual({ status: "interrupted" });
     expect(runCommandJob).not.toHaveBeenCalled();
     expect(await cron.run(job.id, "force")).toEqual({ ok: true, ran: true });
     expect(runCommandJob).toHaveBeenCalledOnce();
-    expect(readOldReceipt()).toEqual({ receipt_id: receiptId, status: "interrupted" });
+    expect(readReceipt(receiptId)).toEqual({ status: "interrupted" });
     expect((await loadCronStore(storePath)).jobs[0]?.state.lastRunStatus).toBe("ok");
   } finally {
     await stopServices(cron);
