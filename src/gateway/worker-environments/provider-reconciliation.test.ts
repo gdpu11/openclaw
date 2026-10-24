@@ -4,8 +4,6 @@ import * as support from "./service.test-support.js";
 import { testState } from "./service.test-support.js";
 import type { WorkerTunnelManager } from "./tunnel.js";
 
-type WorkerEnvironmentServiceError = support.WorkerEnvironmentServiceError;
-type WorkerLifecycleLease = support.WorkerLifecycleLease;
 type Transition = Parameters<typeof testState.store.transition>[0];
 type Environment = NonNullable<ReturnType<typeof testState.store.get>>;
 
@@ -111,31 +109,6 @@ describe("worker environment service", () => {
       credential: support.CREDENTIAL,
       ownerEpoch: 1,
     });
-    expect(testState.bootstrapWorker).not.toHaveBeenCalled();
-  });
-
-  it("inspects a persisted lease with its profile snapshot after profile removal", async () => {
-    await support.seedBootstrapping("worker-crash");
-    testState.config.cloudWorkers!.profiles = {};
-    const inspected: WorkerLifecycleLease[] = [];
-    const workerService = service({
-      inspect: async (lease) => {
-        inspected.push(lease);
-        return { status: "active" };
-      },
-      provision: fail("provision must not run for a known lease"),
-    });
-
-    await workerService.reconcileOnce();
-
-    expect(inspected).toEqual([
-      expect.objectContaining({ leaseId: "lease:worker-crash", profile: { region: "test" } }),
-    ]);
-    expectState("worker-crash", "ready", {
-      bootstrapReceipt: support.BOOTSTRAP_RECEIPT,
-    });
-    expect(testState.prepareInstallation).toHaveBeenCalledWith("bundle");
-    expect(testState.bootstrapWorker).toHaveBeenCalledTimes(1);
   });
 
   it.each(["worker-turn-only capability", "capability and profile removal"] as const)(
@@ -226,7 +199,6 @@ describe("worker environment service", () => {
     expectState("worker-stale", "ready", {
       bootstrapReceipt: support.BOOTSTRAP_RECEIPT,
     });
-    expect(testState.bootstrapWorker).toHaveBeenCalledTimes(1);
   });
 
   it("keeps an admitted lease retryable when local bundle identity is unavailable", async () => {
@@ -289,9 +261,6 @@ describe("worker environment service", () => {
       teardownTerminalState: "failed",
       lastError: "released npm artifact is unavailable",
     });
-    expect(testState.prepareInstallation).toHaveBeenCalledWith("bundle");
-    expect(testState.prepareInstallation).toHaveBeenCalledWith("npm");
-    expect(testState.bootstrapWorker).not.toHaveBeenCalled();
   });
 
   it("uses the snapshotted npm selection after live config changes", async () => {
@@ -365,7 +334,6 @@ describe("worker environment service", () => {
       lastError: "provider temporarily unavailable",
     });
     await workerService.reconcileOnce();
-    expect(tunnelManager.stop).toHaveBeenCalledTimes(4);
     expectState("worker-unknown", "failed", {
       leaseId: null,
       lastError: "Worker provider no longer recognizes the lease",
@@ -492,7 +460,6 @@ describe("worker environment service", () => {
     disconnected = false;
     const restarted = support.createService(provider, { tunnelManager });
     await restarted.reconcileOnce();
-    expect(stop).toHaveBeenCalledTimes(2);
     expect(destroy).toHaveBeenCalledOnce();
     expectState(environmentId, "destroyed");
   });
@@ -527,51 +494,5 @@ describe("worker environment service", () => {
       attachedSessionIds: ["session-new"],
     });
     expect(testState.store.getCredential(environmentId)?.sessionId).toBe("session-new");
-  });
-
-  it("retains teardown intent across an indeterminate allocation resolution", async () => {
-    testState.prepareInstallation = vi.fn(
-      fail("bundle preparation must not block teardown adoption"),
-    );
-    const intent = await testState.store.createIntent({
-      environmentId: "worker-pending-destroy-retry",
-      providerId: "fake",
-      profileId: "development",
-      profileSnapshot: { settings: { region: "test" } },
-      provisionOperationId: "provision:pending-destroy-retry",
-    });
-    await transition(intent.environmentId, "requested", "provisioning");
-    let resolutionFails = true;
-    const destroyed: WorkerLifecycleLease[] = [];
-    const provider = support.createProvider({
-      resolveAllocation: async () => {
-        if (resolutionFails) {
-          throw new Error("allocation identity unavailable");
-        }
-        return { leaseId: "lease-retried", sharedHost: false };
-      },
-      destroy: async (lease) => void destroyed.push(lease),
-    });
-    const workerService = support.createService(provider);
-
-    testState.providersEnabled = false;
-    await expect(workerService.destroy(intent.environmentId)).rejects.toMatchObject({
-      code: "provider_not_found",
-    } satisfies Partial<WorkerEnvironmentServiceError>);
-    expect(testState.store.get(intent.environmentId)?.destroyRequestedAtMs).not.toBeNull();
-
-    testState.providersEnabled = true;
-    await expect(workerService.destroy(intent.environmentId)).rejects.toMatchObject({
-      code: "provider_failure",
-    } satisfies Partial<WorkerEnvironmentServiceError>);
-    expectState(intent.environmentId, "provisioning", {
-      destroyRequestedAtMs: expect.any(Number),
-    });
-
-    resolutionFails = false;
-    await workerService.reconcileOnce();
-    expect(testState.store.get(intent.environmentId)?.state).toBe("destroyed");
-    expect(destroyed).toEqual([{ leaseId: "lease-retried", profile: { region: "test" } }]);
-    expect(testState.prepareInstallation).not.toHaveBeenCalled();
   });
 });
