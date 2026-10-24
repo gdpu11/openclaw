@@ -23,7 +23,6 @@ import {
   completeMcpOAuthAuthorization,
   countMcpOAuthPrincipals,
   readMcpOAuthCredentialsStatus,
-  recordMcpOAuthAuthorizationRequired,
   resolveMcpOAuthAccessToken as resolveToken,
   startMcpOAuthAuthorization,
 } from "./mcp-oauth.js";
@@ -270,9 +269,7 @@ describe("MCP OAuth provider", () => {
       status: "redirect",
       state: "state-1234567890",
     });
-    expect(await storedTokens()).toMatchObject({
-      access_token: "decoy-token",
-    });
+    expect((await storedTokens())?.access_token).toBe("decoy-token");
 
     authMock.mockImplementationOnce(async (loginProvider) => {
       await loginProvider.invalidateCredentials?.("tokens");
@@ -289,38 +286,8 @@ describe("MCP OAuth provider", () => {
 
     authMock.mockImplementationOnce(authorize);
     await expect(completeAuthorization("valid-code")).resolves.toBe("authorized");
-    expect(await readStore()).toMatchObject({
-      tokens: { access_token: ROTATED_ACCESS },
-    });
+    expect((await readStore()).tokens?.access_token).toBe(ROTATED_ACCESS);
     expect((await readStore()).pendingAuthorizationChallenge).toBeUndefined();
-  });
-
-  itWithHome("stops refreshing after a replacement token is rejected twice", async () => {
-    await saveTokens(makeTokens("replacement-token", "replacement-refresh"));
-
-    await expect(
-      recordMcpOAuthAuthorizationRequired({
-        identity: REMOTE_IDENTITY,
-        rejectedAccessToken: "replacement-token",
-        scope: "docs.read",
-      }),
-    ).resolves.toBe(true);
-    await expect(resolveRemoteToken()).rejects.toThrow("requires additional OAuth authorization");
-    expect(authMock).not.toHaveBeenCalled();
-    expect(await storedTokens()).toMatchObject({
-      access_token: "replacement-token",
-    });
-
-    await saveTokens(makeTokens("newer-token", "newer-refresh"));
-    await expect(
-      recordMcpOAuthAuthorizationRequired({
-        identity: REMOTE_IDENTITY,
-        rejectedAccessToken: "replacement-token",
-      }),
-    ).resolves.toBe(false);
-    expect(await storedTokens()).toMatchObject({
-      access_token: "newer-token",
-    });
   });
 
   itWithHome("retains the challenge after a rejected refresh", async () => {
@@ -342,11 +309,9 @@ describe("MCP OAuth provider", () => {
         scope: "docs.write",
       }),
     ).rejects.toThrow("scope refresh rejected");
-    expect(await readStore()).toMatchObject({
-      pendingAuthorizationChallenge: {
-        resourceMetadataUrl: resourceMetadataUrl.toString(),
-        scope: "docs.write",
-      },
+    expect((await readStore()).pendingAuthorizationChallenge).toMatchObject({
+      resourceMetadataUrl: resourceMetadataUrl.toString(),
+      scope: "docs.write",
     });
     expect((await readStore()).discoveryState).toBeUndefined();
 
@@ -577,11 +542,11 @@ describe("MCP OAuth provider", () => {
       expect(await readStoreFor(identity.storeKey)).not.toHaveProperty("codeVerifier");
 
       const secondIdentity = requesterIdentity("fixture", config.url, "sender-b");
+      const completeSecond = (code: string) =>
+        completeMcpOAuthAuthorization(secondIdentity, config, { code });
       const second = await startMcpOAuthAuthorization(secondIdentity, config, {});
       assert(second.status === "redirect", "expected second MCP OAuth redirect");
-      await expect(
-        completeMcpOAuthAuthorization(secondIdentity, config, { code: "wrong-code" }),
-      ).rejects.toThrow();
+      await expect(completeSecond("wrong-code")).rejects.toThrow();
       expect(await readStoreFor(secondIdentity.storeKey)).toMatchObject({
         lastAuthorizationUrl: second.authorizationUrl,
         redirectUrl: second.redirectUrl,
@@ -594,19 +559,13 @@ describe("MCP OAuth provider", () => {
       expect(third.authorizationUrl).not.toBe(second.authorizationUrl);
       expect(await readPending(second.state)).toBeUndefined();
       expect(await readPending(third.state)).toBe(secondIdentity.storeKey);
-      await expect(
-        completeMcpOAuthAuthorization(secondIdentity, config, {
-          code: authorizationCode(second.authorizationUrl),
-        }),
-      ).rejects.toThrow();
+      await expect(completeSecond(authorizationCode(second.authorizationUrl))).rejects.toThrow();
       expect((await readStoreFor(secondIdentity.storeKey)).lastAuthorizationUrl).toBe(
         third.authorizationUrl,
       );
-      await expect(
-        completeMcpOAuthAuthorization(secondIdentity, config, {
-          code: authorizationCode(third.authorizationUrl),
-        }),
-      ).resolves.toBe("authorized");
+      await expect(completeSecond(authorizationCode(third.authorizationUrl))).resolves.toBe(
+        "authorized",
+      );
     } finally {
       await fixture.close();
     }

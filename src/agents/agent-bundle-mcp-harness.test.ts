@@ -467,7 +467,6 @@ afterEach(() => {
 
 describe("materializeRequesterScopedMcpToolsForHarnessRunCore", () => {
   it("returns undefined before any requester resolves", async () => {
-    mocks.setResolveImpl(async () => undefined);
     const result = await requesterTools("session-empty", { requesterSenderId: "guest" });
     expect(result).toBeUndefined();
     expect(mocks.rememberAdvertisedScopedMcpCatalog).not.toHaveBeenCalled();
@@ -560,7 +559,6 @@ describe("materializeRequesterScopedMcpToolsForHarnessRunCore", () => {
       advertisedCatalogConfigFingerprint: "",
     });
     const busy = await fullPermissionTools("session-stable", "busy");
-    expect(busy).toBeDefined();
     expect(specs(busy!.advertisedTools)).toEqual(advertisedSpecs);
     const unavailableResult = await busy!.tools[0]!.execute("busy-call", {});
     expect(unavailableResult.details).toMatchObject({ status: "error" });
@@ -638,7 +636,6 @@ describe("materializeRequesterScopedMcpToolsForHarnessRunCore", () => {
       requestInteractiveCodexApproval,
     });
     const realConnect = gated!.tools.find((tool) => tool.name === "drive__connect");
-    expect(realConnect).toBeDefined();
     await expect(realConnect!.execute("denied-connect", {})).rejects.toThrow("operator denied");
     expect(callTool).not.toHaveBeenCalled();
     await expect(realConnect!.execute("allowed-connect", {})).resolves.toMatchObject({

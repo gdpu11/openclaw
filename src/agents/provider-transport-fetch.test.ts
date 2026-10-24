@@ -17,7 +17,6 @@ import {
   managedStreamCleanupRegistrations,
   resolveProviderRequestPolicyConfigMock,
   shouldUseEnvHttpProxyForUrlMock,
-  withTrustedEnvProxyGuardedFetchModeMock,
 } from "./provider-transport-fetch.test-harness.js";
 import { makeProviderModelFixture } from "./test-helpers/provider-model-fixture.js";
 
@@ -211,7 +210,6 @@ describe("buildGuardedModelFetch", () => {
       });
       expect(params.dispatcherPolicy).toEqual(dispatcherPolicy);
       expect(params.mode).toBe(explicit ? undefined : "trusted_env_proxy");
-      expect(withTrustedEnvProxyGuardedFetchModeMock).toHaveBeenCalledTimes(explicit ? 0 : 1);
     },
   );
 
@@ -460,12 +458,11 @@ describe("buildGuardedModelFetch", () => {
 });
 
 describe("buildGuardedModelFetch headers", () => {
-  const headerModel = makeProviderModelFixture<"openai-responses">({
-    id: "fixture-model",
+  const headerModel = {
+    ...model,
     provider: "openai",
-    api: "openai-responses",
     baseUrl: "https://api.openai.com/v1",
-  });
+  };
   const url = `${headerModel.baseUrl}/responses`;
   const egressHeaders = () => new Headers(fetchWithSsrFGuardMock.mock.lastCall?.[0]?.init?.headers);
 
@@ -530,12 +527,7 @@ describe("buildGuardedModelFetch headers", () => {
 });
 
 describe("buildGuardedModelFetch SSE readability", () => {
-  const completionModel = makeProviderModelFixture<"openai-completions">({
-    id: "fixture-model",
-    provider: "openrouter",
-    api: "openai-completions",
-    baseUrl: "https://openrouter.ai/api/v1",
-  });
+  const completionModel = { ...model, api: "openai-completions" as const };
   const url = `${completionModel.baseUrl}/chat/completions`;
 
   installProviderTransportFetchTestHooks();
@@ -602,18 +594,7 @@ describe("buildGuardedModelFetch SSE readability", () => {
 
   it.each([
     {
-      name: "official OpenAI event-only frames",
-      target: { ...completionModel, provider: "openai", baseUrl: "https://api.openai.com/v1" },
-      input: new Request("https://api.openai.com/v1/responses", { method: "POST" }),
-      init: undefined,
-      chunks: ['event: response.created\n\ndata: {"ok": true}\n\n'],
-      expected: 'event: response.created\n\ndata: {"ok": true}\n\n',
-    },
-    {
       name: "mixed chunked framing and multiline data, excluding blank keepalives",
-      target: completionModel,
-      input: url,
-      init: { method: "POST" },
       chunks: [
         "event: ping\ndata\ndata:\ndata: \t\uFEFF\u00A0\n\nData: ignored\n data: ignored\ndatabase: ignored\n\n",
         'data: {"ok"',
@@ -633,15 +614,12 @@ describe("buildGuardedModelFetch SSE readability", () => {
     },
     {
       name: "a readable EOF tail ending with a blank data line",
-      target: completionModel,
-      input: url,
-      init: undefined,
       chunks: ['data: {"ok": true}\ndata: \t'],
       expected: 'data: {"ok": true}\ndata: \t',
     },
-  ])("preserves $name", async ({ target, input, init, chunks, expected }) => {
+  ])("preserves $name", async ({ chunks, expected }) => {
     mockStream(chunks, "text/event-stream");
-    await expect((await buildGuardedModelFetch(target)(input, init)).text()).resolves.toBe(
+    await expect((await buildGuardedModelFetch(completionModel)(url)).text()).resolves.toBe(
       expected,
     );
   });

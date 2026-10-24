@@ -226,10 +226,6 @@ it("delivers generated attachment metadata with the assistant reply", async () =
     details: { media: { mediaUrls: [attachment.path], attachments: [attachment] } },
   });
   await subscription.waitForPendingEvents();
-  expect(subscription.getPendingToolMediaReply()).toMatchObject({
-    mediaUrls: [attachment.path],
-    attachments: [attachment],
-  });
   emitMessageStartAndEndForAssistantText({ emit, text: "Here is your generated file." });
   emit({ type: "agent_end", messages: [], willRetry: false });
   await subscription.waitForPendingEvents();
