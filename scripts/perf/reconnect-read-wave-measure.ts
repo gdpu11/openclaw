@@ -135,7 +135,7 @@ async function observeGateway() {
     const retainedMeasurements = probe()?.snapshot();
     const { profile } = await allocationSampler.post("HeapProfiler.getSamplingProfile");
     writeFileSync(path.join(output, `${label}-${point}.heapprofile`), JSON.stringify(profile));
-    const families: Record<string, number> = {
+    const families = {
       presentSelectionConsume: 0,
       indexTrim: 0,
       shareSidebar: 0,
@@ -175,7 +175,7 @@ async function observeGateway() {
       const probeAllocation =
         allocationOwner?.file.includes("session-row-churn-probe") ||
         allocationOwner?.file.includes("reconnect-read-wave-");
-      const matching: string[] = [];
+      const matching: Array<keyof typeof families> = [];
       if (
         has("present", "session-row-presentation") &&
         has("consumeCurrent", "session-row-prepared-read") &&
