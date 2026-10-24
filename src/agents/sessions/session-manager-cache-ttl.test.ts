@@ -23,6 +23,10 @@ import { SessionManager } from "./session-manager.js";
 
 const tempDirs = useSessionStoreTempDirs(afterAll, "openclaw-session-cache-ttl-");
 
+const branchIds = (manager: SessionManager) => manager.getBranch().map((entry) => entry.id);
+const projection = (manager: SessionManager) =>
+  serializeCacheTtlToolResultProjections(restore(manager));
+
 async function createSessionScope(sessionId: string) {
   const dir = tempDirs.make();
   const scope = sessionScope(path.join(dir, "sessions.json"), sessionId);
@@ -99,6 +103,11 @@ async function seedProjection(sessionId: string, afterReset = false, cacheTouche
     deltaId,
     expected,
     tailBytes,
+    options: (maxEvents = 2, maxBytes = 64_000) => ({ cwd: dir, maxEvents, maxBytes }),
+    prefix: () => [
+      source.getHeader(),
+      ...source.getBranch().filter((entry) => entry.id !== retainedId && entry.id !== deltaId),
+    ],
   };
 }
 
@@ -142,10 +151,7 @@ it.each(["events", "bytes"] as const)(
       maxEvents: cutoff === "events" ? 2 : 100,
       maxBytes: cutoff === "bytes" ? fixture.tailBytes : 64_000,
     });
-    expect(bounded.getBranch().map((entry) => entry.id)).toEqual([
-      fixture.retainedId,
-      fixture.deltaId,
-    ]);
+    expect(branchIds(bounded)).toEqual([fixture.retainedId, fixture.deltaId]);
     expect(bounded.getEntry(fixture.checkpointId)).toBeUndefined();
     expect(bounded.getToolResultProjectionEntries().map((entry) => entry.id)).toContain(
       fixture.checkpointId,
@@ -175,17 +181,9 @@ it("keeps the projection prefix behind the admitted-turn read fence", async () =
   );
   const bounded = await runWithSessionTranscriptReadFence(
     { ...admission.anchor, logicalTurnId: "projection-fence", role: "user" },
-    () =>
-      SessionManager.openBoundedAsync(fixture.scope, {
-        cwd: fixture.dir,
-        maxEvents: 2,
-        maxBytes: 64_000,
-      }),
+    () => SessionManager.openBoundedAsync(fixture.scope, fixture.options()),
   );
-  expect(bounded.getBranch().map((entry) => entry.id)).toEqual([
-    fixture.retainedId,
-    fixture.deltaId,
-  ]);
+  expect(branchIds(bounded)).toEqual([fixture.retainedId, fixture.deltaId]);
   expect(bounded.getToolResultProjectionEntries().map((entry) => entry.id)).not.toContain(
     laterCheckpointId,
   );
@@ -194,11 +192,7 @@ it("keeps the projection prefix behind the admitted-turn read fence", async () =
 
 it("restores a checkpoint newer than an injected reset boundary", async () => {
   const fixture = await seedProjection("projection-after-reset", true);
-  const bounded = await SessionManager.openBoundedAsync(fixture.scope, {
-    cwd: fixture.dir,
-    maxEvents: 2,
-    maxBytes: 64_000,
-  });
+  const bounded = await SessionManager.openBoundedAsync(fixture.scope, fixture.options());
   expect(bounded.getBranch().map((entry) => entry.type)).toEqual(["reset", "message", "custom"]);
   expect(replay(bounded).at(-1)).toEqual(fixture.expected);
 });
@@ -220,37 +214,30 @@ it.each(["delta", "checkpoint"] as const)(
     };
     expect(
       replaceTranscriptEventsSync(fixture.scope, [
-        fixture.source.getHeader(),
-        ...fixture.source
-          .getBranch()
-          .filter((entry) => entry.id !== retained.id && entry.id !== delta.id),
+        ...fixture.prefix(),
         compaction,
         { ...retained, parentId: compaction.id },
         marker === "checkpoint" ? { ...delta, data: laterState } : delta,
       ]),
     ).toBe(true);
-    const options = { cwd: fixture.dir, maxEvents: 2, maxBytes: 64_000 };
+    const options = fixture.options(2);
     const bounded = await SessionManager.openBoundedAsync(fixture.scope, options);
     const detached = await SessionManager.openDetachedBoundedAsync(fixture.scope, options);
     for (const manager of [bounded, detached]) {
-      expect(manager.getBranch().map((entry) => entry.id)).toEqual([
-        compaction.id,
-        retained.id,
-        delta.id,
-      ]);
+      expect(branchIds(manager)).toEqual([compaction.id, retained.id, delta.id]);
       expect(manager.buildSessionContext().messages.map((message) => message.role)).toEqual([
         "compactionSummary",
         "toolResult",
       ]);
-      expect(serializeCacheTtlToolResultProjections(restore(manager))).toEqual(laterState);
+      expect(projection(manager)).toEqual(laterState);
 
       await manager.branchAsync(compaction.id);
-      expect(manager.getBranch().map((entry) => entry.id)).toEqual([compaction.id]);
-      expect(serializeCacheTtlToolResultProjections(restore(manager))).toEqual(checkpoint.data);
+      expect(branchIds(manager)).toEqual([compaction.id]);
+      expect(projection(manager)).toEqual(checkpoint.data);
       expect(manager.buildSessionContext().messages).toHaveLength(1);
 
       await manager.branchAsync(delta.id);
-      expect(serializeCacheTtlToolResultProjections(restore(manager))).toEqual(laterState);
+      expect(projection(manager)).toEqual(laterState);
       expect(replay(manager).at(-1)).toEqual(fixture.expected);
     }
   },
@@ -307,16 +294,13 @@ it.each(["async", "sync"] as const)(
   "preserves checkpoint metadata in %s detached views",
   async (mode) => {
     const fixture = await seedProjection(`projection-detached-${mode}`);
-    const options = { cwd: fixture.dir, maxEvents: 2, maxBytes: 64_000 };
+    const options = fixture.options(2);
     const detached =
       mode === "async"
         ? await SessionManager.openDetachedBoundedAsync(fixture.scope, options)
         : SessionManager.openDetachedBounded(fixture.scope, options);
     expect(detached.getSessionTarget()).toBeUndefined();
-    expect(detached.getBranch().map((entry) => entry.id)).toEqual([
-      fixture.retainedId,
-      fixture.deltaId,
-    ]);
+    expect(branchIds(detached)).toEqual([fixture.retainedId, fixture.deltaId]);
     expect(replay(detached)).toEqual([fixture.expected]);
   },
 );
@@ -358,17 +342,9 @@ it.each([
           timestamp: checkpoint.timestamp,
         },
       ]
-    : [
-        fixture.source.getHeader(),
-        ...fixture.source
-          .getBranch()
-          .filter((entry) => entry.id !== retained.id && entry.id !== delta.id),
-        hidden,
-        retainedWithParent,
-        delta,
-      ];
+    : [...fixture.prefix(), hidden, retainedWithParent, delta];
   expect(replaceTranscriptEventsSync(fixture.scope, entries)).toBe(true);
-  const options = { cwd: fixture.dir, maxEvents: 3, maxBytes: 64_000 };
+  const options = fixture.options(3);
   const bounded = await SessionManager.openBoundedAsync(fixture.scope, options);
   const detached = await SessionManager.openDetachedBoundedAsync(fixture.scope, options);
   for (const manager of [bounded, detached]) {
@@ -398,21 +374,21 @@ it.each([
     const fixture = await seedProjection(`projection-opaque-only-${mode}-${action}`, afterReset);
     await fixture.source.appendLabelChangeAsync(fixture.olderId, "earlier message");
     const expected = serializeCacheTtlToolResultProjections(fixture.state);
-    const options = { cwd: fixture.dir, maxEvents: 1, maxBytes: 64_000 };
+    const options = fixture.options(1);
     const manager =
       mode === "bounded"
         ? await SessionManager.openBoundedAsync(fixture.scope, options)
         : await SessionManager.openDetachedBoundedAsync(fixture.scope, options);
     expect(manager.buildSessionContext().messages).toEqual([]);
-    expect(serializeCacheTtlToolResultProjections(restore(manager))).toEqual(expected);
+    expect(projection(manager)).toEqual(expected);
     if (action === "continue") {
       const id = await manager.appendMessageAsync(makeUserMessage("continue", 3));
       if (!id) {
         throw new Error("Missing continuation fixture entry");
       }
-      expect(serializeCacheTtlToolResultProjections(restore(manager))).toEqual(expected);
+      expect(projection(manager)).toEqual(expected);
       await manager.branchAsync(id);
-      expect(serializeCacheTtlToolResultProjections(restore(manager))).toEqual(expected);
+      expect(projection(manager)).toEqual(expected);
     }
     if (action === "summary" || action === "refused summary") {
       const boundary = afterReset
@@ -426,7 +402,7 @@ it.each([
         await expect(
           manager.branchWithSummaryAsync(fixture.olderId, "unavailable branch"),
         ).rejects.toThrow("not found");
-        expect(serializeCacheTtlToolResultProjections(restore(manager))).toEqual(expected);
+        expect(projection(manager)).toEqual(expected);
         return;
       }
       if (boundary) {
@@ -438,7 +414,7 @@ it.each([
     } else {
       await manager.resetLeafAsync();
     }
-    expect(serializeCacheTtlToolResultProjections(restore(manager))).toEqual({
+    expect(projection(manager)).toEqual({
       prunedToolResults: [],
       ambiguousToolResultBaseKeys: [],
       frozenToolResults: [],
@@ -474,7 +450,7 @@ it.each(["delta", "checkpoint", "no marker"] as const)(
       maxBytes: 64_000,
     });
     await detached.branchAsync(suffix === "delta" ? fixture.deltaId : fixture.retainedId);
-    expect(serializeCacheTtlToolResultProjections(restore(detached))).toEqual(
+    expect(projection(detached)).toEqual(
       suffix === "delta" ? serializeCacheTtlToolResultProjections(fixture.state) : checkpoint.data,
     );
   },
@@ -482,11 +458,7 @@ it.each(["delta", "checkpoint", "no marker"] as const)(
 
 it("preserves projection dependencies when a rewrite replaces the bounded anchor", async () => {
   const fixture = await seedProjection("projection-rewritten-anchor");
-  const bounded = await SessionManager.openBoundedAsync(fixture.scope, {
-    cwd: fixture.dir,
-    maxEvents: 2,
-    maxBytes: 64_000,
-  });
+  const bounded = await SessionManager.openBoundedAsync(fixture.scope, fixture.options());
   const rewrite = await bounded.prepareTranscriptRewriteAsync();
   const branch = rewrite.sessionManager.getBranch();
   await rewrite.sessionManager.resetLeafAsync();
@@ -517,11 +489,7 @@ it("preserves projection dependencies when a rewrite replaces the bounded anchor
 
 it("recovers projection dependencies without retaining intervening cache touches", async () => {
   const fixture = await seedProjection("projection-many-touches", false, 40);
-  const bounded = await SessionManager.openBoundedAsync(fixture.scope, {
-    cwd: fixture.dir,
-    maxEvents: 2,
-    maxBytes: 64_000,
-  });
+  const bounded = await SessionManager.openBoundedAsync(fixture.scope, fixture.options());
   expect(bounded.getToolResultProjectionEntries().map((entry) => entry.id)).toEqual([
     fixture.checkpointId,
     fixture.retainedId,
@@ -564,15 +532,11 @@ it.each([{ cacheTtlDelta: null }, { prunedToolResults: null }, null, "damaged ma
       delta,
     ];
     expect(replaceTranscriptEventsSync(fixture.scope, entries)).toBe(true);
-    const bounded = await SessionManager.openBoundedAsync(fixture.scope, {
-      cwd: fixture.dir,
-      maxEvents: 2,
-      maxBytes: 64_000,
-    });
-    expect(bounded.getBranch().map((entry) => entry.id)).toEqual([retained.id, delta.id]);
+    const bounded = await SessionManager.openBoundedAsync(fixture.scope, fixture.options());
+    expect(branchIds(bounded)).toEqual([retained.id, delta.id]);
     expect(bounded.getEntry(damaged.id)).toBeUndefined();
     expect(bounded.getEntry(checkpoint.id)).toBeUndefined();
-    expect(serializeCacheTtlToolResultProjections(restore(bounded))).toEqual(checkpoint.data);
+    expect(projection(bounded)).toEqual(checkpoint.data);
   },
 );
 
@@ -603,10 +567,7 @@ it.each([
   const hasDelta = position === "prefix-scan";
   expect(
     replaceTranscriptEventsSync(fixture.scope, [
-      fixture.source.getHeader(),
-      ...fixture.source
-        .getBranch()
-        .filter((entry) => entry.id !== retained.id && entry.id !== delta.id),
+      ...fixture.prefix(),
       opaque,
       { ...retained, parentId: opaque.id },
       ...(hasDelta ? [delta] : []),
@@ -617,28 +578,22 @@ it.each([
     : checkpoint.data;
   const full = await SessionManager.openAsync(fixture.scope, fixture.dir);
   expect(full.getEntry(opaque.id)).toBeUndefined();
-  expect(serializeCacheTtlToolResultProjections(restore(full))).toEqual(expected);
+  expect(projection(full)).toEqual(expected);
 
-  const options = { cwd: fixture.dir, maxEvents: 2, maxBytes: 64_000 };
+  const options = fixture.options(2);
   const bounded = await SessionManager.openBoundedAsync(fixture.scope, options);
   const detached = await SessionManager.openDetachedBoundedAsync(fixture.scope, options);
   for (const manager of [bounded, detached]) {
     expect(manager.getEntry(opaque.id)).toBeUndefined();
     expect(manager.getEntry(checkpoint.id)).toBeUndefined();
-    expect(manager.getBranch().map((entry) => entry.id)).toEqual(
-      hasDelta ? [retained.id, delta.id] : [retained.id],
-    );
-    expect(serializeCacheTtlToolResultProjections(restore(manager))).toEqual(expected);
+    expect(branchIds(manager)).toEqual(hasDelta ? [retained.id, delta.id] : [retained.id]);
+    expect(projection(manager)).toEqual(expected);
   }
 });
 
 it("retires the prefix on a new branch, full hydration, reset, and retarget", async () => {
   const fixture = await seedProjection("projection-prefix-lifecycle");
-  const limits = {
-    cwd: fixture.dir,
-    maxEvents: 2,
-    maxBytes: 64_000,
-  };
+  const limits = fixture.options();
   const bounded = await SessionManager.openBoundedAsync(fixture.scope, limits);
   const retargeted = await SessionManager.openBoundedAsync(fixture.scope, limits);
   expect(replay(bounded)).toEqual([fixture.expected]);
@@ -690,12 +645,8 @@ it("resolves checkpoint ancestry by active position when imported rows have forw
       },
     ]),
   ).toBe(true);
-  const bounded = await SessionManager.openBoundedAsync(fixture.scope, {
-    cwd: fixture.dir,
-    maxEvents: 2,
-    maxBytes: 64_000,
-  });
-  expect(bounded.getBranch().map((entry) => entry.id)).toEqual([retained.id, delta.id]);
+  const bounded = await SessionManager.openBoundedAsync(fixture.scope, fixture.options());
+  expect(branchIds(bounded)).toEqual([retained.id, delta.id]);
   expect(bounded.getEntry(checkpoint.id)).toBeUndefined();
   expect(replay(bounded)).toEqual([fixture.expected]);
   expect(bounded.getBranch()).toHaveLength(2);
@@ -737,17 +688,17 @@ it("preserves a retained checkpoint through a forward label with an omitted targ
       .slice(-4)
       .map((entry) => entry.id),
   ).toEqual([checkpoint.id, label.id, retained.id, delta.id]);
-  expect(serializeCacheTtlToolResultProjections(restore(full))).toEqual(expected);
+  expect(projection(full)).toEqual(expected);
   expect(replay(full).at(-1)).toEqual(fixture.expected);
 
-  const options = { cwd: fixture.dir, maxEvents: 4, maxBytes: 64_000 };
+  const options = fixture.options(4);
   const bounded = await SessionManager.openBoundedAsync(fixture.scope, options);
   const detached = await SessionManager.openDetachedBoundedAsync(fixture.scope, options);
   expect(bounded.getEntry(fixture.olderId)).toBeUndefined();
   expect(bounded.getEntry(label.id)).toBeUndefined();
   expect(bounded.getEntry(checkpoint.id)).toBeDefined();
   for (const manager of [bounded, detached]) {
-    expect(serializeCacheTtlToolResultProjections(restore(manager))).toEqual(expected);
+    expect(projection(manager)).toEqual(expected);
     expect(replay(manager)).toEqual([fixture.expected]);
   }
 });
@@ -808,13 +759,13 @@ it.each([
         ? { prunedToolResults: [], ambiguousToolResultBaseKeys: [], frozenToolResults: [] }
         : snapshot("tool:after:1");
     const full = await SessionManager.openAsync(scope, dir);
-    expect(serializeCacheTtlToolResultProjections(restore(full))).toEqual(expected);
+    expect(projection(full)).toEqual(expected);
     const bounded = await SessionManager.openBoundedAsync(scope, {
       cwd: dir,
       maxEvents: 1,
       maxBytes: 1_024,
     });
-    expect(serializeCacheTtlToolResultProjections(restore(bounded))).toEqual(expected);
+    expect(projection(bounded)).toEqual(expected);
     if (lastType === "reset") {
       expect(JSON.stringify(bounded.getToolResultProjectionEntries())).not.toContain(marker);
     }
