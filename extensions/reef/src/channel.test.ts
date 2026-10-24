@@ -48,7 +48,7 @@ const ingress = (id: string, text: string, replyTo?: string) =>
     autonomy: "bounded",
   });
 
-function observeSettlement(task: Promise<void>) {
+function observeSettlement(task: Promise<unknown>) {
   let settled = false;
   const outcome = task.then(
     () => {

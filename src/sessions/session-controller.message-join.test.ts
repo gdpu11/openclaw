@@ -395,7 +395,7 @@ it.each<[string, Outcome, JoinCase?]>([
             toolAuthorityFingerprint: joined.toolAuthorityFingerprint,
             toolAuthorityPreparation: bindPreparedToolAuthority(
               bindWorkerToolPreparation({
-                authorityKind: "source-bound",
+                authorityKind: "source-bound" as const,
                 assertCurrent: closed ? assertSource : readAuthority,
                 compatAssertCurrent: readAuthority,
                 prepareCurrent:

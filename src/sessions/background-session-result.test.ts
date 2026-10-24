@@ -384,7 +384,7 @@ it("does not commit when cancelled during display preparation", async () => {
   expect(await loadTranscriptEvents(target.scope)).toEqual([]);
 });
 
-it.each([
+it.each<[string, Partial<SessionEntry>, string]>([
   ["archived conversation", { archivedAt: 2 }, "archived"],
   ["session-id replacement", { sessionId: "replacement-session" }, "session rebound"],
   [
@@ -392,25 +392,22 @@ it.each([
     { lifecycleRevision: "replacement-revision" },
     "session rebound",
   ],
-] satisfies [string, Partial<SessionEntry>, string][])(
-  "refuses %s",
-  async (_, replacement, reason) => {
-    const target = await createTarget();
-    await target.replace(replacement);
+])("refuses %s", async (_, replacement, reason) => {
+  const target = await createTarget();
+  await target.replace(replacement);
 
-    await expect(target.commit()).resolves.toMatchObject({
-      ok: false,
-      reason: expect.stringContaining(reason),
-    });
+  await expect(target.commit()).resolves.toMatchObject({
+    ok: false,
+    reason: expect.stringContaining(reason),
+  });
 
-    await expect(
-      loadTranscriptEvents({
-        ...target.scope,
-        sessionId: replacement.sessionId ?? target.sessionId,
-      }),
-    ).resolves.toEqual([]);
-  },
-);
+  await expect(
+    loadTranscriptEvents({
+      ...target.scope,
+      sessionId: replacement.sessionId ?? target.sessionId,
+    }),
+  ).resolves.toEqual([]);
+});
 
 it("treats a missing lifecycle revision as exact generation state", async () => {
   const target = await createTarget();

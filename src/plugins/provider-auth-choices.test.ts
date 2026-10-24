@@ -7,6 +7,7 @@ const officialCatalogMocks = vi.hoisted(() => ({
   listOfficialExternalProviderCatalogEntries: vi.fn(),
 }));
 
+// mock-isolation: Keep metadata-only choice tests independent of plugin discovery state.
 vi.mock("./plugin-metadata-snapshot.js", () => ({
   resolvePluginMetadataSnapshot: pluginRegistryMocks.resolvePluginMetadataSnapshot,
 }));
@@ -379,8 +380,9 @@ describe("provider auth choice manifest helpers", () => {
       }),
     );
     expect(resolveChoices()).toStrictEqual(expected);
-    if (expected.length) {
-      expect(resolveChoice(expected[0].choiceId)).toEqual(expected[0]);
+    const first = expected[0];
+    if (first) {
+      expect(resolveChoice(first.choiceId)).toEqual(first);
     }
     if (name === "non-executable fallback") {
       expect(declaredChoices()).toEqual([]);
