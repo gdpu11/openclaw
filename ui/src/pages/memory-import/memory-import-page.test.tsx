@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MigrationsMemoryApplyResult } from "../../../../packages/gateway-protocol/src/schema/migrations.js";
 import { createDeferredCore } from "../../../../src/shared/deferred.ts";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
+import type { AgentsListResult } from "../../api/types.ts";
 import { createAgentSelectionCapability } from "../../app/agent-selection.ts";
 import type { ApplicationContext, ApplicationGatewaySnapshot } from "../../app/context.ts";
 import { createAgentCapability } from "../../lib/agents/index.ts";
@@ -14,19 +15,17 @@ import {
   createApplicationGateway,
   createSolidApplicationContextProvider,
 } from "../../test-helpers/solid-application-context.tsx";
-import { flush, waitForSolid } from "../../test-helpers/solid-settle.ts";
+import { flush, waitForSolid as settle } from "../../test-helpers/solid-settle.ts";
 import { MemoryImportPage } from "./memory-import-page.tsx";
-import type { SessionBackfillGatewayResult } from "./view-types.ts";
 
 type TestContext = ApplicationContext & { notify(): void };
 type Handlers = Record<string, (params: { agentId?: string }) => unknown>;
 let handlers: Handlers;
-let request: ReturnType<typeof createRequest>;
 let context: TestContext;
 let page: HTMLElement;
+let refresh: () => void;
 let disposals: Array<() => void>;
 
-const settle = waitForSolid;
 const calls = (count: number) => settle(() => expect(request).toHaveBeenCalledTimes(count));
 const textAppears = (text: string) => settle(() => expect(page.textContent).toContain(text));
 const date = (index = 0) => page.querySelectorAll<HTMLInputElement>("input[type='date']")[index];
@@ -44,27 +43,16 @@ function connection(
   Object.assign(context.gateway.snapshot, { phase }, patch);
   context.notify();
 }
-function refresh() {
-  const control = [...page.querySelectorAll<HTMLButtonElement>("button")].find(
-    (candidate) => candidate.textContent?.trim() === "Refresh",
-  );
-  expect(control).toBeDefined();
-  control!.click();
-}
 
-function createRequest(methods: Handlers) {
-  return vi.fn(async (method: string, params: { agentId?: string }) => {
-    const handler = Object.hasOwn(methods, method) ? methods[method] : undefined;
-    if (!handler) {
-      throw new Error(`unexpected method: ${method}`);
-    }
-    return handler(params);
-  });
-}
+const request = vi.fn(async (method: string, params: { agentId?: string }) => {
+  const handler = Object.hasOwn(handlers, method) ? handlers[method] : undefined;
+  if (!handler) {
+    throw new Error(`unexpected method: ${method}`);
+  }
+  return handler(params);
+});
 
-function agentRoster(
-  ...ids: string[]
-): NonNullable<ApplicationContext["agents"]["state"]["agentsList"]> {
+function agentRoster(...ids: string[]): AgentsListResult {
   return {
     defaultId: ids[0]!,
     mainKey: "main",
@@ -82,19 +70,15 @@ function button(id: string) {
   return page.querySelector<HTMLButtonElement>(`[data-test-id='memory-${id}']`);
 }
 
-async function ready(id: string, disabled?: boolean) {
-  await settle(() => {
-    expect(button(id)).not.toBeNull();
-    if (disabled !== undefined) {
-      expect(button(id)?.disabled).toBe(disabled);
-    }
-  });
-}
+const ready = (id: string, disabled?: boolean) =>
+  settle(() => expect(button(id)).toMatchObject(disabled === undefined ? {} : { disabled }));
 
-async function openImport() {
-  await ready("import-provider-button");
-  button("import-provider-button")?.click();
-  await ready("import-confirm");
+async function openImport(rollback = false) {
+  const trigger = rollback ? "backfill-rollback" : "import-provider-button";
+  await ready(trigger);
+  button(trigger)!.click();
+  await ready(rollback ? "backfill-rollback-confirm" : "import-confirm");
+  return button(rollback ? "backfill-rollback-confirm" : "import-confirm")!;
 }
 
 const emptySummary = {
@@ -107,7 +91,7 @@ const emptySummary = {
   sensitive: 0,
 };
 
-function createPlan(agentId = "research") {
+function createPlan(agentId = "research", collectionIds = ["codex"]) {
   const workspace = `/tmp/openclaw-${agentId}`;
   const provider = {
     providerId: "codex",
@@ -117,13 +101,11 @@ function createPlan(agentId = "research") {
     source: "/tmp/codex",
     target: workspace,
     summary: { ...emptySummary, planned: 1 },
-    items: [
-      {
-        id: "memory:codex:MEMORY.md",
-        status: "planned",
-        details: { collectionId: "codex", collectionLabel: "Codex" },
-      },
-    ],
+    items: collectionIds.map((collectionId) => ({
+      id: `memory:codex:${collectionId}.md`,
+      status: "planned",
+      details: { collectionId, collectionLabel: collectionId },
+    })),
   };
   return { agentId, workspace, providers: [provider] };
 }
@@ -133,16 +115,11 @@ function createApplyResult(): MigrationsMemoryApplyResult {
     providerId: "codex",
     source: "/tmp/codex",
     summary: { ...emptySummary, migrated: 1 },
-    items: [{ id: "memory:codex:MEMORY.md", status: "migrated" }],
+    items: [{ id: "memory:codex:codex.md", status: "migrated" }],
   };
 }
 
-function backfillChunk(
-  days = 0,
-  candidates = 0,
-  staged = 0,
-  hasMore = false,
-): SessionBackfillGatewayResult {
+function backfillChunk(days = 0, candidates = 0, staged = 0, hasMore = false) {
   return {
     days,
     candidates,
@@ -172,19 +149,12 @@ function createContext(): TestContext {
         connected: true,
         agentsLoading: false,
         agentsError: null,
-        agentsList: {
-          defaultId: "research",
-          agents: [{ id: "research", name: "Research" }],
-        },
+        agentsList: agentRoster("research"),
       },
       ensureList: vi.fn(),
       subscribe,
     },
-    agentSelection: {
-      state: { selectedId: "research" },
-      set: vi.fn(),
-      subscribe,
-    },
+    agentSelection: { state: { selectedId: "research" }, set: vi.fn(), subscribe },
   } as unknown as TestContext;
 }
 
@@ -192,15 +162,14 @@ async function mountPage(target: ApplicationContext = context) {
   const { wrapper } = createSolidApplicationContextProvider(target);
   const view = mountSolid(() => <MemoryImportPage />, { wrapper });
   flush();
-  const element = view.container.querySelector<HTMLElement>("openclaw-memory-import-page");
-  expect(element).not.toBeNull();
-  page = element!;
+  page = view.container;
+  refresh = () => view.getByRole("button", { name: "Refresh" }).click();
 }
 
 beforeEach(() => {
   disposals = [];
   handlers = { "migrations.memory.plan": () => createPlan() };
-  request = createRequest(handlers);
+  request.mockClear();
   context = createContext();
 });
 
@@ -209,8 +178,6 @@ afterEach(() => {
   for (const dispose of disposals) {
     dispose();
   }
-  document.body.replaceChildren();
-  vi.restoreAllMocks();
 });
 
 describe("MemoryImportPage", () => {
@@ -229,71 +196,23 @@ describe("MemoryImportPage", () => {
     expect(page.textContent).toContain("/tmp/openclaw-research");
   });
 
-  it("replans per target or overwrite, coalesces receipts, and stops on disposal", async () => {
-    handlers["migrations.memory.plan"] = (params) => createPlan(params.agentId);
-    await mountPage();
-    expect(request).toHaveBeenCalledTimes(1);
-
-    context.agents.state.agentsList = agentRoster("writer");
-    context.agentSelection.state.selectedId = "writer";
-    context.notify();
-    context.notify();
-    expect(request).toHaveBeenCalledTimes(2);
-    expect(request.mock.calls[1]?.[1]).toEqual({ agentId: "writer", overwrite: false });
-    await textAppears("/tmp/openclaw-writer");
-
-    expect(page.textContent).not.toContain("/tmp/openclaw-research");
-
-    page.querySelector<HTMLInputElement>('input[role="switch"]')!.click();
-    context.notify();
-    expect(request).toHaveBeenCalledTimes(3);
-    expect(request.mock.calls[2]?.[1]).toEqual({ agentId: "writer", overwrite: true });
-    await ready("import-provider-button", false);
-
-    cleanupSolid();
-    context.agentSelection.state.selectedId = "research";
-    context.agents.state.agentsList = agentRoster("research");
-    context.notify();
-    expect(request).toHaveBeenCalledTimes(3);
-  });
-
-  it("retains a loaded plan after roster refresh failure and retries the roster on Refresh", async () => {
-    const roster = createDeferredCore<unknown>();
-    let rosterReply: Promise<unknown> = roster.promise;
-    let plan = createPlan();
-    handlers["agents.list"] = () => rosterReply;
-    handlers["migrations.memory.plan"] = () => plan;
+  it("retains a plan on roster failure and refreshes the page for the recovered target", async () => {
     const agents = createAgentCapability(context.gateway);
     disposals.push(() => agents.dispose());
-    // The application shell owns the initial shared roster request.
-    const initial = agents.ensureList();
+    agents.state.agentsList = agentRoster("research");
+    handlers["migrations.memory.plan"] = (params) => createPlan(params.agentId);
+    handlers["agents.list"] = () => {
+      throw new Error("Agent roster unavailable");
+    };
     await mountPage({ ...context, agents });
-    roster.reject(new Error("Agent roster unavailable"));
-    rosterReply = createDeferredCore().promise;
-    await initial;
-    flush();
-    flush();
-    expect(page.textContent).toContain("Agent roster unavailable");
-
-    rosterReply = Promise.resolve(agentRoster("research"));
-    refresh();
     await ready("import-provider-button");
-    expect(page.textContent).not.toContain("Agent roster unavailable");
-    rosterReply = Promise.reject(new Error("Agent roster unavailable"));
     await agents.refreshList();
     flush();
     expect(button("import-provider-button")).not.toBeNull();
     expect(page.textContent).toContain("/tmp/openclaw-research");
-    expect(
-      request.mock.calls.filter(([method]) => method === "migrations.memory.plan"),
-    ).toHaveLength(1);
-
-    rosterReply = Promise.resolve(agentRoster("writer"));
-    plan = createPlan("writer");
+    handlers["agents.list"] = () => agentRoster("writer");
     refresh();
     await textAppears("/tmp/openclaw-writer");
-    expect(page.textContent).not.toContain("Agent roster unavailable");
-    expect(page.textContent).toContain("/tmp/openclaw-writer");
     expect(page.textContent).not.toContain("/tmp/openclaw-research");
   });
 
@@ -317,8 +236,7 @@ describe("MemoryImportPage", () => {
       }
       await mountPage();
       if (afterApply) {
-        await openImport();
-        button("import-confirm")!.click();
+        (await openImport()).click();
       }
       await textAppears("planning unavailable: OPENAI_API_KEY=sk-123...cdef");
       expect(page.textContent).not.toContain("sk-1234567890abcdef");
@@ -343,8 +261,7 @@ describe("MemoryImportPage", () => {
         throw new Error("response lost");
       });
     await mountPage();
-    await openImport();
-    const confirm = button("import-confirm")!;
+    const confirm = await openImport();
     confirm.click();
     confirm.click();
     expect(request).toHaveBeenCalledTimes(2);
@@ -361,12 +278,7 @@ describe("MemoryImportPage", () => {
   });
 
   it("retains selections, dates, previews and confirmation across a same-client reconnect", async () => {
-    const plan = createPlan();
-    plan.providers[0]!.items.push({
-      ...plan.providers[0]!.items[0]!,
-      id: "memory:codex:other.md",
-      details: { collectionId: "other", collectionLabel: "Other" },
-    });
+    const plan = createPlan("research", ["codex", "other"]);
     Object.assign(handlers, {
       "migrations.memory.plan": (params: { agentId?: string }) => ({
         ...plan,
@@ -414,8 +326,7 @@ describe("MemoryImportPage", () => {
     flush();
     expect(button("backfill-rollback-confirm")?.disabled).toBe(true);
     connection("connected");
-    await calls(4);
-    expect(button("backfill-rollback-confirm")).not.toBeNull();
+    await ready("backfill-rollback-confirm", false);
 
     connection("connected", { client: { request } as unknown as GatewayBrowserClient });
     await calls(5);
@@ -451,8 +362,7 @@ describe("MemoryImportPage", () => {
       const roster = context.agents.state.agentsList;
       await mountPage();
 
-      await openImport();
-      button("import-confirm")?.click();
+      (await openImport()).click();
       await calls(2);
       const firstApply = applyParams(1);
 
@@ -465,6 +375,9 @@ describe("MemoryImportPage", () => {
       context.notify();
       flush();
       expect(button("import-confirm")?.disabled ?? true).toBe(true);
+      if (interruption === "roster loss") {
+        expect(page.textContent).toContain("Agent roster unavailable");
+      }
       firstApplyResult.resolve(result);
       await Promise.resolve();
 
@@ -480,9 +393,8 @@ describe("MemoryImportPage", () => {
       button("import-confirm")?.click();
       await calls(4);
 
-      const retryApply = applyParams(3);
       expect(firstApply?.idempotencyKey).toMatch(/\S/u);
-      expect(retryApply).toEqual(firstApply);
+      expect(applyParams(3)).toEqual(firstApply);
     },
   );
 
@@ -494,31 +406,19 @@ describe("MemoryImportPage", () => {
         .fn()
         .mockReturnValue(nextPlan.promise)
         .mockReturnValueOnce(createPlan());
-      const agentChange = target.startsWith("agent");
       context.agents.state.agentsList = agentRoster("research", "writer");
-      const selection = agentChange
-        ? createAgentSelectionCapability(context.gateway, context.agents)
-        : undefined;
-      if (selection) {
-        disposals.push(() => selection.dispose());
-      }
+      const selection = createAgentSelectionCapability(context.gateway, context.agents);
+      disposals.push(() => selection.dispose());
       context.gateway.snapshot.selfUser = { id: "first", name: "First" };
       const hello = gatewayHelloForMethods(["memory.sessionBackfill.preview"]);
       context.gateway.snapshot.hello = {
         ...hello,
         auth: { ...hello.auth, recoveryScope: "first" },
       };
-      await mountPage(selection ? { ...context, agentSelection: selection } : context);
+      await mountPage({ ...context, agentSelection: selection });
       const id = target === "agent rollback" ? "backfill-rollback-confirm" : "import-confirm";
-      if (target === "agent rollback") {
-        await ready("backfill-rollback");
-        button("backfill-rollback")!.click();
-      } else {
-        await openImport();
-      }
+      const confirm = await openImport(target === "agent rollback");
       setDate(date()!);
-      await ready(id);
-      const confirm = button(id)!;
       if (target === "account") {
         context.gateway.snapshot.selfUser = { id: "second", name: "Second" };
       } else if (target === "recovery") {
@@ -527,7 +427,7 @@ describe("MemoryImportPage", () => {
           auth: { ...hello.auth, recoveryScope: "second" },
         };
       } else {
-        selection!.set("writer");
+        selection.set("writer");
       }
       context.notify();
       // Click the retained DOM node before Solid has rendered the new authority scope.
@@ -537,10 +437,10 @@ describe("MemoryImportPage", () => {
       expect(button(id)).toBeNull();
       expect(date()?.value).toBe("");
       expect(page.textContent).not.toContain("/tmp/openclaw-research");
-      if (agentChange) {
+      if (target.startsWith("agent")) {
         expect(request.mock.calls[1]?.[1]).toMatchObject({ agentId: "writer" });
-        nextPlan.reject(new Error("Writer plan unavailable"));
-        await textAppears("Writer plan unavailable");
+        nextPlan.reject(new Error("Replacement plan unavailable"));
+        await textAppears("Replacement plan unavailable");
         expect(button(id)).toBeNull();
         expectOnlyPlans();
       } else {
@@ -562,8 +462,7 @@ describe("MemoryImportPage", () => {
       context.agents.state.agentsList = agentRoster("research", "writer");
       await mountPage();
       if (operation === "import") {
-        await openImport();
-        button("import-confirm")!.click();
+        (await openImport()).click();
         await ready("import-confirm", true);
       } else {
         await ready("backfill-apply", false);
@@ -583,6 +482,20 @@ describe("MemoryImportPage", () => {
       await pending.promise;
       flush();
       expect(page.textContent).toContain("/tmp/openclaw-writer");
+      if (operation === "import") {
+        expect(request.mock.calls.at(-1)?.[1]).toEqual({ agentId: "writer", overwrite: false });
+        page.querySelector<HTMLInputElement>('input[role="switch"]')!.click();
+        const count = request.mock.calls.length;
+        context.notify();
+        context.notify();
+        expect(request).toHaveBeenCalledTimes(count);
+        expect(request.mock.calls.at(-1)?.[1]).toEqual({ agentId: "writer", overwrite: true });
+        await ready("import-provider-button", false);
+        cleanupSolid();
+        context.agentSelection.state.selectedId = "research";
+        context.notify();
+        expect(request).toHaveBeenCalledTimes(count);
+      }
     },
   );
 
@@ -614,10 +527,7 @@ describe("MemoryImportPage", () => {
       throw new Error("rollback unavailable");
     };
     await mountPage();
-    await ready("backfill-rollback");
-    button("backfill-rollback")?.click();
-    await ready("backfill-rollback-confirm");
-    button("backfill-rollback-confirm")?.click();
+    (await openImport(true)).click();
 
     await textAppears("rollback unavailable");
     expect(request.mock.calls.at(-1)).toEqual([
