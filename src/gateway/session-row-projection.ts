@@ -349,7 +349,7 @@ export async function createSessionRowProjection(params: records.ProjectionOptio
         }
         const id = records.identity(row);
         // Runtime summary state does not change the entry-derived materialization.
-        if (presentationOnly && records.ready(row) && !dirty.has(id) && row.facts) {
+        if (presentationOnly && row.facts) {
           row.facts.refreshActivitySummary();
         } else {
           dirty.add(id);
