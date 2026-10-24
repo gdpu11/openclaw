@@ -598,12 +598,7 @@ export function materializeSessionRow(input: ReturnType<typeof readSessionRowInp
     lastThreadId: deliveryFields.lastThreadId,
     pluginExtensions: input.pluginExtensions.length > 0 ? input.pluginExtensions : undefined,
   };
-  // JSON omits undefined fields; keep the resident projection equally sparse.
-  for (const field in row) {
-    if (Reflect.get(row, field) === undefined) {
-      Reflect.deleteProperty(row, field);
-    }
-  }
+  // Fresh rows and writer patches retain undefined fields; JSON omits them at egress.
   return Object.freeze({
     row: freezeTrustedJsonSnapshot<Readonly<GatewaySessionRow>>(row),
     source: Object.freeze({

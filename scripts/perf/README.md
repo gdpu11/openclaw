@@ -4540,6 +4540,98 @@ synthetic agent roster, not a production-state or browser-rendering benchmark.
 Run concurrent baseline/candidate pairs with the same `--start-at` and swap CPU
 halves for the next pair, as above.
 
+## Measure session-row identity during sidebar churn
+
+`reconnect-read-wave-measure.ts` reproduces cold Control UI RPC traffic while a
+preconnected writer changes session timestamps. It uses the real compiled
+Gateway and synthetic device pairing, subscriptions, board reads, session
+resolution, and sidebar searches. Generate a fresh team-shape fixture per side
+with 5,000 sessions, 6,000 settled runs, 200 approvals, 100 cron jobs, 12 projects,
+and 64 MiB of logical transcript text. Use the same explicit seed and reference
+time for both sides. The fixture is mutated during setup and cannot be reused
+for another timing sample.
+
+Before building each disposable baseline or candidate source tree, run:
+
+```sh
+python3 scripts/perf/session-row-churn-instrument.py --check
+python3 scripts/perf/session-row-churn-instrument.py
+OUTPUT_SOURCE_MAPS=1 node --import ./scripts/tsx.mjs scripts/build-all.mts sourcePerformance
+```
+
+The instrumentation imports `session-row-churn-probe.ts` into the scratch build;
+it does not add a product configuration option or a production probe hook.
+Preserve the exact instrumentation patch and compiled build identity. Validate
+all source anchors again when rebasing. Never apply this instrumenter to an
+operator checkout or ship the instrumented build.
+
+```sh
+node --enable-source-maps --import ./scripts/tsx.mjs \
+  scripts/perf/reconnect-read-wave-measure.ts \
+  --root /path/to/fresh-fixture --output /path/to/new-output \
+  --entry /path/to/compiled-dist/entry.js --clients 65 --port 41669 \
+  --sync /path/to/pair/start --side base
+```
+
+`session-row-churn-pair.py` coordinates one prepared pair on the campaign host.
+Create `<run>/base/state` and `<run>/fix/state` first, then run it under the
+host's preparation wrapper:
+
+```sh
+python3 scripts/perf/session-row-churn-pair.py \
+  --checkout /path/to/source --root /srv/perf-sandbox/<task>/results/pair-1 \
+  --pair 1 --slot b --base-entry /path/to/base-dist/entry.js \
+  --fix-entry /path/to/fix-dist/entry.js
+```
+
+Increment `--pair` for each fresh pair; it swaps launch order and CPU assignment.
+Use `--retention` with a fresh `retention-1` root for five-wave diagnostics.
+The coordinator preserves guard/start/load metadata and rejects failed pairs.
+`python3 scripts/perf/session-row-churn-summary.py /path/to/results` reports the
+paired means, signed absolute/relative deltas, raw sample counts and settled
+retention families. It does not decide the campaign's acceptance gates.
+
+The other side uses a separate fixture, output and loopback port, the same
+`--sync` prefix, and `--side fix`. Each side writes
+`<prefix>.wave-0.<side>.ready` after its measured Gateway and writer socket are
+ready. The coordinator waits for both ready files, assigns the task-owned
+scopes to their interleaved measurement CPUs, then writes a future epoch in
+milliseconds to `<prefix>.wave-0.go`. Missing or missed starts fail the run.
+Keep the shared quiet lock and production guard around the concurrent pair;
+swap both launch order and CPU placement on the next pair. Build and fixture
+preparation follow the host's preparation CPU and sequential-write rules.
+
+Each measured wave submits exactly 200 `chat.inject` writes at 50 ms intervals
+across 200 nonarchived sessions. Three rounds of 65 `sessions.list` searches
+start after at least 20, 80 and 140 committed writes. Every round must start
+before the writer finishes. The result records writer scheduling lag, round
+overlap, all RPC outcomes, and separate cold/search request windows. Search p90
+uses the 195 search calls; initial static-field construction and repeated
+rebuilds are reported separately. Task scopes retain inclusive CPU/time and
+exclusive stall segments without double-counting nested tasks.
+
+Run a labeled smoke before the predeclared paired comparison: the baseline
+must exhibit repeated field construction, the unchanged-search candidate must
+have zero rebuilds, and both must complete all writes and reads. Preserve setup
+failures separately. Timing runs collect untraced main-isolate GC time, counts,
+per-kind pause tails and maxima, plus event-loop sample counts. Apply the
+campaign's sample-count, absolute-delta, and matched A/A-control rules; a short
+wave may not provide enough observations to gate event-loop p99. Promotion is
+outside this untraced pass.
+
+`--retention` runs five consecutive waves in one Gateway. Release the same
+ready/go barrier for every wave. It enables detailed object-identity tracking
+and a 32 KiB surviving-allocation sampler. After all reads and writes finish,
+it captures with subscriptions active, then again after subscription teardown.
+Settled captures wait out the response retention interval and run two major
+collections separated by an event-loop turn. Memory is read before allocating
+profile reports. Named presentation/selection/consume, index/trim, and
+share/sidebar allocation families are inclusive and may overlap. These are
+sampled surviving JavaScript bytes, not attributed native allocations. Live
+presentation counts use weak references; materialized/facts replacements count
+reference changes separately from value and own-property changes. Keep this
+diagnostic pass separate from timing acceptance.
+
 ## Measure session roster refreshes during row churn
 
 `session-roster-churn-measure.ts` starts an isolated loopback Gateway, creates 270
