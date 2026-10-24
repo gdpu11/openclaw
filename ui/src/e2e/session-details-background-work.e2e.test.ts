@@ -294,6 +294,9 @@ suite.define(() => {
                   .locator(".chat-details-mobile-processes__show-all > span")
                   .evaluate((element) => getComputedStyle(element).fontVariantNumeric),
               ).toBe("tabular-nums");
+              expect(
+                await processGroup.locator(".chat-details__process-elapsed").first().textContent(),
+              ).not.toBe("");
               const mobileStop = processGroup.getByRole("button", {
                 name: "Stop Background terminal",
                 exact: true,
@@ -327,6 +330,9 @@ suite.define(() => {
                 subagentsBounds.y + subagentsBounds.height,
               );
               const first = processGroup.locator('[data-process-id="dev-server"]');
+              expect(await first.locator(".chat-details-processes__open").textContent()).toBe(
+                processes[0]!.name,
+              );
               const stop = first.getByRole("button", {
                 name: "Stop Background terminal",
                 exact: true,
@@ -368,6 +374,9 @@ suite.define(() => {
               await longName.hover();
               const hoverBounds = (await longName.boundingBox())!;
               expect(hoverBounds.width).toBe(restBounds.width);
+              await capture("processes-long-name-hover-" + colorScheme + "-" + width, details, [
+                longName,
+              ]);
               expect(hoverBounds.height).toBe(restBounds.height);
               expect(await longName.locator("..").getAttribute("aria-label")).toContain(
                 processes[1]!.name,

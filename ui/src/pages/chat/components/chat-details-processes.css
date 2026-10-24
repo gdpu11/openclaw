@@ -25,7 +25,11 @@
   }
 
   &:is(:hover, :focus-within, [data-stopping]) {
-    &[data-actionable] :is(.chat-details-processes__elapsed, .chat-details__process-elapsed) {
+    &[data-actionable] .chat-details-processes__name {
+      mask-image: linear-gradient(to right, black calc(100% - 42px), transparent calc(100% - 26px));
+    }
+
+    &[data-actionable] .chat-details__process-elapsed {
       visibility: hidden;
     }
 
@@ -159,14 +163,6 @@
     min-width: 0;
     overflow-wrap: anywhere;
   }
-}
-
-.chat-details-processes__elapsed {
-  flex: none;
-  color: var(--muted);
-  font-size: var(--control-ui-text-xs);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
 }
 
 .chat-details-processes__view-all {

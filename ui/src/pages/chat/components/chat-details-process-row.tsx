@@ -24,6 +24,9 @@ export function ChatDetailsProcessRow(props: {
     <>
       <span class="chat-details__process-icon" data-status={props.row.status} aria-hidden="true">
         <Icon name="terminal" />
+        <span class="chat-details-processes__badge" data-status={props.row.status}>
+          <span class="chat-details-processes__spinner" />
+        </span>
       </span>
       <span
         ref={createTextOverflow(() => props.row.name)}

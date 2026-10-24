@@ -428,8 +428,7 @@ openclaw-chat-details[mobile] {
 .chat-details__agent-avatar[data-status] {
   position: relative;
 }
-.chat-details__agent-avatar[data-status]::after,
-.chat-details__process-icon::after {
+.chat-details__agent-avatar[data-status]::after {
   content: "";
   position: absolute;
   inset-block-end: -2px;
@@ -440,8 +439,7 @@ openclaw-chat-details[mobile] {
   border-radius: 50%;
   background: var(--muted);
 }
-.chat-details__agent-avatar[data-status="running"]::after,
-.chat-details__process-icon[data-status="running"]::after {
+.chat-details__agent-avatar[data-status="running"]::after {
   background: var(--info);
   animation: chat-details-pulse 1.6s ease-in-out infinite;
 }
@@ -564,7 +562,6 @@ button.chat-details__process:is(:hover, :focus-visible) {
 }
 @media (prefers-reduced-motion: reduce) {
   .chat-details__agent-avatar[data-status="running"]::after,
-  .chat-details__process-icon[data-status="running"]::after,
   .chat-details__tally-segment[data-state="running"] {
     animation: none;
   }

@@ -1,6 +1,5 @@
 import { Errored, For, Loading, Show, createMemo, createSignal, isPending, latest } from "solid-js";
 import type { SessionProcessSummary } from "../../../../../packages/gateway-protocol/src/schema/session-processes.js";
-import { ElapsedTime } from "../../../components/elapsed-time.tsx";
 import { Icon } from "../../../components/solid/icon.tsx";
 import { useScrollState } from "../../../components/solid/scroll-state.ts";
 import { registerChatDetailsEnglish } from "../../../i18n/locales/en-chat-details.ts";
@@ -66,9 +65,6 @@ function ProcessRow(props: {
         </span>
         <span class="chat-details-processes__name" ref={nameOverflow}>
           {props.row.name}
-        </span>
-        <span class="chat-details-processes__elapsed">
-          <ElapsedTime startMs={props.row.startedAt} endMs={props.row.endedAt ?? null} />
         </span>
       </button>
       <Show when={props.row.status === "running" && props.row.canStop}>
