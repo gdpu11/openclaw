@@ -295,10 +295,11 @@ function MobileRoot(
       publicationEntry={
         props.details.githubPublication ? props.content.publicationEntry : undefined
       }
+      processesCount={t("chat.processesPanel.runningCount", {
+        count: String(props.content.processes?.rows.length ?? 0),
+      })}
       processes={
-        props.content.processes &&
-        (props.content.processes.rows.length > 0 ||
-          (props.content.processes.errorKind !== "read" && props.content.processes.error)) ? (
+        props.content.processes && props.content.processes.rows.length > 0 ? (
           <ChatDetailsMobileProcesses
             data={props.content.processes}
             presented={props.presented}

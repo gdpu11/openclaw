@@ -1,20 +1,23 @@
-import { Show } from "solid-js";
+import { Show, createMemo } from "solid-js";
 import type { SessionProcessSummary } from "../../../../../packages/gateway-protocol/src/schema/session-processes.js";
 import { ElapsedTime } from "../../../components/elapsed-time.tsx";
 import { Icon } from "../../../components/solid/icon.tsx";
 import { createTextOverflow } from "../../../components/solid/text-overflow.ts";
 import { t } from "../../../lib/reactive/i18n.ts";
+import "./chat-details-processes.css";
+import type { createProcessesPresentation } from "./chat-processes-presentation.ts";
 
 /** Shared compact row; callers retain navigation and presentation policy. */
 export function ChatDetailsProcessRow(props: {
   row: SessionProcessSummary;
-  onOpen?: () => void;
+  onOpen?: (instanceId?: string) => void;
+  presentation: ReturnType<typeof createProcessesPresentation>;
   hoverDescription?: boolean;
   disabled?: boolean;
 }) {
+  const stop = createMemo(() => props.presentation.createStop(() => props.row));
   const status = () => t(`chat.processesPanel.status.${props.row.status}`);
-  const lastLine = () => props.row.tail.trimEnd().split("\n").at(-1)?.trim() ?? "";
-  const description = () => [props.row.name, status(), lastLine()].filter(Boolean).join(". ");
+  const description = () => [props.row.name, status()].filter(Boolean).join(". ");
   const title = () => (props.hoverDescription ? description() : undefined);
   const content = () => (
     <>
@@ -31,17 +34,17 @@ export function ChatDetailsProcessRow(props: {
       <span class="chat-details__process-elapsed" aria-hidden="true">
         <ElapsedTime startMs={props.row.startedAt} endMs={props.row.endedAt ?? null} />
       </span>
-      <span
-        ref={createTextOverflow(() => lastLine() || status())}
-        class="chat-details__process-tail"
-        title={lastLine() || status()}
-      >
-        {lastLine() || status()}
-      </span>
     </>
   );
   return (
-    <div role="listitem" data-process-id={props.row.processId}>
+    <div
+      class="chat-details-processes__row"
+      role="listitem"
+      data-process-id={props.row.processId}
+      data-status={props.row.status}
+      data-stopping={stop().stopping() ? "" : undefined}
+      data-actionable={props.row.canStop ? "" : undefined}
+    >
       <Show
         when={props.onOpen}
         fallback={
@@ -56,10 +59,33 @@ export function ChatDetailsProcessRow(props: {
           title={title()}
           aria-label={description()}
           disabled={props.disabled}
-          onClick={() => props.onOpen?.()}
+          onClick={() => props.onOpen?.(props.row.instanceId)}
         >
           {content()}
         </button>
+      </Show>
+      <Show when={props.row.canStop}>
+        <button
+          class="chat-details-processes__action chat-details-processes__stop"
+          type="button"
+          title={t("chat.processesPanel.stopProcess")}
+          aria-label={t("chat.processesPanel.stop", { name: props.row.name })}
+          disabled={props.disabled || stop().stopping()}
+          onClick={() => {
+            if (!props.disabled) {
+              void stop().stop();
+            }
+          }}
+        >
+          <Show when={stop().stopping()} fallback={<Icon name="stop" />}>
+            <span class="chat-details-processes__spinner" />
+          </Show>
+        </button>
+      </Show>
+      <Show when={stop().stopping()}>
+        <span class="sr-only" role="status">
+          {t("chat.processesPanel.stopping")}
+        </span>
       </Show>
     </div>
   );

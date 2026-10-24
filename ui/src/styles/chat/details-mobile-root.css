@@ -420,7 +420,6 @@
   height: var(--mobile-list-icon);
 }
 
-.chat-details-mobile-processes .chat-details__process-tail,
 .chat-details-mobile-processes .chat-details__process-elapsed {
   color: var(--muted);
   font: 400 12px/18px var(--font-body);

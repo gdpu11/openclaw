@@ -1,4 +1,4 @@
-import { For, Show, createMemo } from "solid-js";
+import { For, Show } from "solid-js";
 import { registerChatDetailsEnglish } from "../../../i18n/locales/en-chat-details.ts";
 import { registerChatSessionEnglish } from "../../../i18n/locales/en-chat-session.ts";
 import { registerProcessesEnglish } from "../../../i18n/locales/en-processes.ts";
@@ -6,6 +6,7 @@ import { registerSessionOrganizationEnglish } from "../../../i18n/locales/en-ses
 import { registerEnglishCatalog, t } from "../../../lib/reactive/i18n.ts";
 import type { ProcessesPanelData } from "../processes-panel-data.ts";
 import { ChatDetailsProcessRow } from "./chat-details-process-row.tsx";
+import type { createProcessesPresentation } from "./chat-processes-presentation.ts";
 
 registerEnglishCatalog(registerChatSessionEnglish);
 registerEnglishCatalog(registerChatDetailsEnglish);
@@ -16,23 +17,20 @@ registerEnglishCatalog(registerSessionOrganizationEnglish);
 export type ChatDetailsMobileProcessesProps = {
   /** The session host retains the native ProcessesPanelData projection and its demand. */
   data: Pick<ProcessesPanelData["snapshot"], "rows" | "error" | "errorKind" | "loading"> &
-    Pick<ProcessesPanelData, "refresh">;
+    Pick<ProcessesPanelData, "refresh"> & {
+      presentation: ReturnType<typeof createProcessesPresentation>;
+    };
   presented: boolean;
-  onOpen?: () => void;
+  onOpen?: (instanceId?: string) => void;
 };
-
-const order = { running: 0, failed: 1, killed: 2, completed: 3 } as const;
 
 /** Two native process rows; the existing host opens the complete collection. */
 export function ChatDetailsMobileProcesses(props: ChatDetailsMobileProcessesProps) {
-  const rows = createMemo(() =>
-    props.data.rows.toSorted((a, b) => order[a.status] - order[b.status]),
-  );
   return (
     <div class="chat-details-mobile-processes">
-      <Show when={rows().length === 0 && props.data.errorKind !== "read" && props.data.error}>
-        <div class="chat-details-mobile-processes__error" role="status">
-          <span>{t("chat.sessionDetails.processesError")}</span>
+      <Show when={props.data.errorKind !== "read" && props.data.error}>
+        <div class="chat-details-mobile-processes__error" role="alert">
+          <span>{props.data.error}</span>
           <button
             type="button"
             class="chip"
@@ -44,9 +42,14 @@ export function ChatDetailsMobileProcesses(props: ChatDetailsMobileProcessesProp
         </div>
       </Show>
       <div role="list" aria-label={t("chat.sessionDetails.processes")}>
-        <For each={rows().slice(0, 2)} keyed={(row) => row.instanceId}>
+        <For each={props.data.rows.slice(0, 2)} keyed={(row) => row.instanceId}>
           {(row) => (
-            <ChatDetailsProcessRow row={row()} disabled={!props.presented} onOpen={props.onOpen} />
+            <ChatDetailsProcessRow
+              presentation={props.data.presentation}
+              row={row()}
+              disabled={!props.presented}
+              onOpen={props.onOpen}
+            />
           )}
         </For>
       </div>
@@ -57,7 +60,7 @@ export function ChatDetailsMobileProcesses(props: ChatDetailsMobileProcessesProp
           disabled={!props.presented}
           onClick={() => props.onOpen?.()}
         >
-          <span class="chat-details-mobile-root__copy">{t("sessionsView.showAll")}</span>
+          <span class="chat-details-mobile-root__copy">{t("chat.processesPanel.viewAll")}</span>
         </button>
       </Show>
     </div>

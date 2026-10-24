@@ -448,12 +448,10 @@ openclaw-chat-details[mobile] {
 .chat-details__agent-avatar[data-status="waiting"]::after {
   background: var(--warn);
 }
-.chat-details__agent-avatar[data-status="done"]::after,
-.chat-details__process-icon[data-status="completed"]::after {
+.chat-details__agent-avatar[data-status="done"]::after {
   background: var(--ok);
 }
-.chat-details__agent-avatar[data-status="failed"]::after,
-.chat-details__process-icon[data-status="failed"]::after {
+.chat-details__agent-avatar[data-status="failed"]::after {
   background: var(--danger);
 }
 
@@ -523,13 +521,14 @@ openclaw-chat-details[mobile] {
   text-align: start;
 }
 .chat-details__process {
+  grid-template-rows: auto;
   color: var(--text);
 }
 button.chat-details__process:is(:hover, :focus-visible) {
   background: var(--bg-hover);
 }
 .chat-details__process-icon {
-  grid-row: 1 / span 2;
+  grid-row: 1;
   position: relative;
   color: var(--muted);
   background: var(--bg-hover);
@@ -538,20 +537,12 @@ button.chat-details__process:is(:hover, :focus-visible) {
   width: 13px;
   height: 13px;
 }
-.chat-details__process-name,
-.chat-details__process-tail {
+.chat-details__process-name {
   overflow: hidden;
   min-width: 0;
   text-overflow: clip;
   white-space: nowrap;
-}
-.chat-details__process-name {
   font-family: var(--mono);
-  font-size: 11px;
-}
-.chat-details__process-tail {
-  grid-column: 2 / -1;
-  color: var(--muted);
   font-size: 11px;
 }
 .chat-details__more {

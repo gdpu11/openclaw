@@ -228,3 +228,28 @@ it("closes dashboard presentation through its owner without minimizing unrelated
   expect(isSidebarSlotVisible(h.state.sidebarLayout, "terminal")).toBe(true);
   expect(h.state.sidebarLayout.open).toBe(true);
 });
+
+it("discards a Details process request after switching agents on the same global key", () => {
+  vi.stubGlobal("localStorage", createStorageMock());
+  vi.stubGlobal("sessionStorage", createStorageMock());
+  const { pane, state, mount } = createDashboardHarness({
+    row: { key: "global", agentId: "main", sessionId: "global-session", kind: "direct" },
+  });
+  onTestFinished(() => mount.remove());
+  pane.routeFace = "chat";
+  state.assistantAgentId = "main";
+  const open = () => {
+    const details = pane.render().layout?.header?.header.header.detailsControl?.chat;
+    expectDefined(details?.onOpenProcesses, "Details process action")("process-main");
+  };
+  open();
+  state.assistantAgentId = "research";
+  expect(pane.companionIntents.processesShowRequest?.()).toBeUndefined();
+
+  open();
+  expect(pane.companionIntents.processesShowRequest?.()).toEqual({
+    instanceId: "process-main",
+    fromDetails: true,
+  });
+  expect(pane.companionIntents.processesShowRequest).toBeUndefined();
+});
