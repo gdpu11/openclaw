@@ -15,6 +15,7 @@ a=p.parse_args(); a.checkout=a.checkout.resolve(); a.root=a.root.resolve()
 assert str(a.root).startswith('/srv/perf-sandbox/') and a.root.parent != Path('/srv/perf-sandbox'), 'Use a dedicated task sandbox run directory'
 assert a.pair>=1
 for side in ['base','fix']: assert (a.root/side/'state/team-shape-summary.json').is_file()
+ports={side:json.loads((a.root/side/'state/openclaw.json').read_text())['gateway']['port'] for side in ['base','fix']}
 assert not any((a.root/side/'output').exists() for side in ['base','fix'])
 guard='/srv/perf-sandbox/slot-b-guard.sh'
 lock_path=Path('/srv/perf-sandbox/.quiet.lock' if a.slot=='a' else '/srv/perf-sandbox/.quiet-b.lock')
@@ -29,7 +30,7 @@ if a.pair%2==0: cpus.reverse()
 units={side:f'session-row-churn-{os.getpid()}-{side}.scope' for side in ['base','fix']}
 children={}; logs=[]; guard_proc=None; outside=None
 prefix=a.root/'start'
-meta={'pair':a.pair,'slot':a.slot,'startEpochMs':int(time.time()*1000),'cpus':dict(zip(['base','fix'],cpus)),'retention':a.retention,'sync':[]}
+meta={'pair':a.pair,'slot':a.slot,'startEpochMs':int(time.time()*1000),'cpus':dict(zip(['base','fix'],cpus)),'retention':a.retention,'ports':ports,'sync':[]}
 def stop_signal(signum,frame): raise RuntimeError(f'pair interrupted by signal {signum}')
 signal.signal(signal.SIGTERM,stop_signal);signal.signal(signal.SIGINT,stop_signal)
 try:
@@ -46,7 +47,7 @@ try:
   for d in ['home','tmp']: (task_dir/d).mkdir(exist_ok=True)
   log=(task_dir/'measure.log').open('w');logs.append(log)
   # Board widgets reserve Gateway port + 1 for the MCP App sandbox listener.
-  cmd=['systemd-run','--scope','--quiet',f'--unit={units[side]}','-p',f'AllowedCPUs={meta["cpus"][side]}','-p','CPUWeight=10','-p','IOWeight=10','-p','MemoryMax=24G','nice','-n','10','ionice','-c3','env',f'HOME={task_dir}/home',f'OPENCLAW_HOME={task_dir}/home',f'TMPDIR={task_dir}/tmp','node','--enable-source-maps','--import','./scripts/tsx.mjs','scripts/perf/reconnect-read-wave-measure.ts','--root',str(task_dir/'state'),'--output',str(task_dir/'output'),'--entry',str(entry.resolve()),'--clients','65','--port',str(41669 if side=='base' else 41679),'--sync',str(prefix),'--side',side]
+  cmd=['systemd-run','--scope','--quiet',f'--unit={units[side]}','-p',f'AllowedCPUs={meta["cpus"][side]}','-p','CPUWeight=10','-p','IOWeight=10','-p','MemoryMax=24G','nice','-n','10','ionice','-c3','env',f'HOME={task_dir}/home',f'OPENCLAW_HOME={task_dir}/home',f'TMPDIR={task_dir}/tmp','node','--enable-source-maps','--import','./scripts/tsx.mjs','scripts/perf/reconnect-read-wave-measure.ts','--root',str(task_dir/'state'),'--output',str(task_dir/'output'),'--entry',str(entry.resolve()),'--clients','65','--port',str(ports[side]),'--sync',str(prefix),'--side',side]
   if a.retention: cmd.append('--retention')
   # nice is additive: reset only this new launcher before requesting workload priority 10.
   children[side]=subprocess.Popen(cmd,cwd=a.checkout,stdout=log,stderr=subprocess.STDOUT,preexec_fn=lambda:os.setpriority(os.PRIO_PROCESS,0,0))
