@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { runtimeProcessDeployEntryFileName } from "../infra/runtime-process-manifest.js";
+import { runtimeProcessDeployEntryFileName } from "../infra/runtime-process-manifest.ts";
 
 export const WORKER_BUNDLE_MANIFEST_VERSION = "openclaw-worker-bundle-v1";
 export const WORKER_BUNDLE_ARTIFACT_MODE = 0o700;

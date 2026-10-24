@@ -6,7 +6,7 @@ import { isEmbeddedStandaloneModule, resolveStandaloneNpmCliPath } from "../../c
 import {
   pluginRuntimeProcessManifest,
   runtimeProcessDependencyEntrypoints,
-} from "./runtime-process-manifest.js";
+} from "./runtime-process-manifest.ts";
 
 /** Resolve dependency programs from the calling package, preserving its installed dependencies. */
 export function resolveRuntimeDependencyEntrypointUrl(

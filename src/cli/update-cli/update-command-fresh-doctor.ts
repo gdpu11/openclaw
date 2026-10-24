@@ -193,21 +193,16 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
       };
     }
     const workerRuntime = params.nodeRunner ?? resolveNodeRunner();
-    const workerCommand = [
-      workerRuntime,
-      ...resolveRuntimeWorkerArgv(
-        resolveRuntimeWorkerUrl({
-          ...runtimeProcessEntrypoints.updateMigratedFinalize,
-          root: params.root,
-        }),
-        workerRuntime,
-      ),
-    ];
+    const workerUrl = resolveRuntimeWorkerUrl({
+      ...runtimeProcessEntrypoints.updateMigratedFinalize,
+      root: params.root,
+    });
+    const workerCommand = [workerRuntime, ...resolveRuntimeWorkerArgv(workerUrl, workerRuntime)];
     const doctorConfigWrites =
       run &&
       (params.doctorConfigWrites ??
         (await inspectUpdateDoctorChildSupport(
-          workerCommand,
+          { workerUrl, argv: workerCommand },
           {
             cwd: params.root,
             timeoutMs: params.timeoutMs,
