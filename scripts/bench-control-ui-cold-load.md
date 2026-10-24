@@ -215,6 +215,15 @@ These are CPU deltas rather than elapsed wall time; later live, streaming, and
 session-switch phases retain the same selected time domain. Default runs keep
 CDP's `timeTicks` domain.
 
+Use a separate `--coverage --runs 1 --first-load --cold-http-cache --untraced`
+capture to inspect JavaScript exercised by cold boot. Each `run-N.coverage.json`
+records V8 function/block ranges and loaded, executed, and unused UTF-8 bytes per
+asset through settlement; nested block counts override enclosing function counts.
+Keep coverage captures separate from timing comparisons because instrumentation
+changes execution cost. Source maps and the exact saved bundle allow attribution
+of the unused ranges; preload transfer budgets remain the performance checker's
+authority, including assets that have not executed.
+
 On a noisy host, run an A/A control before interpreting candidate differences.
 First copy the baseline bundle to a separate directory (`cp -R <base> <control>`):
 the runner temporarily swaps comparison bundles, so both slots cannot use the same
@@ -236,10 +245,13 @@ cache during warm reloads. Without that option, Playwright's synthetic HTTP rout
 disable caching: "warm" then describes persisted application state only.
 `http.waterfall[].transferBytes` records the actual transfer.
 
-`--warm-reload --probe-dir /path/to/probes` adds cache/paint diagnostics. The probe directory supplies `loaf-mutation.init.js` and
-`ws-rpc-census.init.js`. The output records cache reads, cached transcript visibility,
+`--warm-reload` adds self-contained cache/paint diagnostics. An optional
+`--probe-dir /path/to/probes` supplies `mutattr.init.js`, `loaf-mutation.init.js`,
+and `ws-rpc-census.init.js` for additional attribution; `externalRig` records which
+extra instruments are available. The output records cache reads, cached transcript visibility,
 hello, live catch-up, enabled input, layout shifts, mutation batches, and retained
-row elements. Visibility and enabled-input milestones are DOM observations;
+row elements, duplicate visible row keys, and the same visible row's viewport offset
+at the cached-to-live handoff. Visibility and enabled-input milestones are DOM observations;
 FCP is the browser's paint metric. Diagnostic runs also save filmstrip frames.
 Use `--untraced` for timing comparisons without boot tracing or CPU sampling,
 then collect separate traced runs for the storyboard and attribution.
