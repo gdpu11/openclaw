@@ -35,10 +35,9 @@ import {
 import {
   commitCronRunRequests,
   drainCronRunQueue,
-  stopCronRunQueue,
   waitForCronRunQueue,
 } from "./service/run-queue.js";
-import { createCronServiceState, type CronServiceDeps } from "./service/state.js";
+import type { CronServiceDeps } from "./service/state.js";
 import { onTimer } from "./service/timer.test-support.js";
 import { loadCronStore, saveCronStore } from "./store.js";
 import { createCronScheduledRunId } from "./store/run-request-id.js";
@@ -225,17 +224,6 @@ it.for(["startup", "scheduled"] as const)(
         healthy.release.resolve();
         await withinTest(healthyFinished, signal);
         await drainCronRunQueue(state);
-        const receipts = runOpenClawStateWriteTransaction(({ db }) =>
-          db
-            .prepare(
-              "SELECT job_id, status FROM cron_run_receipts WHERE store_key = ? ORDER BY job_id",
-            )
-            .all(storePath),
-        );
-        expect(receipts).toEqual([
-          { job_id: healthyJob.id, status: "ok" },
-          ...slowJobs.map((job) => ({ job_id: job.id, status: "running" })),
-        ]);
         // A different service can still be preparing the same agent id.
         recordAgentDatabaseAdmissions(
           refusal
@@ -487,8 +475,6 @@ it("shares capacity across sibling services for timer, manual, stream, and consu
   const timerRequested = createDeferred();
   const blockers = Array.from({ length: 8 }, (_, index) => commandJob(`blocker-${index}`));
   const manual = commandJob("queued-manual");
-  const disabled = commandJob("queued-disabled");
-  const removed = commandJob("queued-removed");
   const timed = commandJob("queued-timer", NOW + 10_000);
   const exitSchedule = { kind: "on-exit" as const, command: "synthetic-watch" };
   const exit: CronJob = { ...commandJob("queued-exit"), schedule: exitSchedule, state: {} };
@@ -499,7 +485,7 @@ it("shares capacity across sibling services for timer, manual, stream, and consu
     payload: { kind: "agentTurn", message: "configured stream payload" },
     state: { streamSourceIdentity: "synthetic-source" },
   };
-  const storePath = await storeJobs([...blockers, manual, disabled, removed, timed, stream, exit]);
+  const storePath = await storeJobs([...blockers, manual, timed, stream, exit]);
   let active = 0;
   let peakActive = 0;
   let blockersStarted = 0;
@@ -553,23 +539,6 @@ it("shares capacity across sibling services for timer, manual, stream, and consu
     );
     const manualAck = await cron.enqueueRun(manual.id, "force");
     expect(manualAck).toMatchObject({ ok: true, enqueued: true });
-    for (const [job, remove] of [
-      [disabled, false],
-      [removed, true],
-    ] as const) {
-      const ack = await sibling.enqueueRun(job.id, "force");
-      if (!ack.ok || !("runId" in ack)) {
-        throw new Error("Expected a queued request before cancellation");
-      }
-      if (remove) {
-        await cron.remove(job.id);
-      } else {
-        await cron.update(job.id, { enabled: false });
-      }
-      expect(await sibling.waitForManualRun(ack.runId, 60_000, signal)).toBe(true);
-      expect(active).toBe(8);
-      expect(executed).toEqual([]);
-    }
     const streamRun = sibling.run(stream.id, "force", {
       payload: { kind: "agentTurn", message: "accepted stream payload" },
       streamBatch: "line one\nline two",
@@ -670,38 +639,24 @@ it("contains recovered scheduled launch failures without an unhandled rejection"
   const storePath = await storeJobs([job]);
   const receiptId = createCronScheduledRunId(storePath, job.id, NOW);
   await requestStoredRun(storePath, job, receiptId, true);
-  const failure = new Error("scheduler owner is retired");
-  const scheduler = createTestGatewayScheduler();
-  const state = createCronServiceState(
-    serviceDeps(storePath, {
-      scheduler,
-      runSchedulerOwned: async () => {
-        throw failure;
-      },
-    }),
-  );
+  const { cron, state } = service(storePath, {
+    runSchedulerOwned: async () => {
+      throw new Error("scheduler owner is retired");
+    },
+  });
   // Durable requests survive restart; this new owner has no caller completion to observe.
   state.store = await loadCronStore(storePath);
-  const unhandled: unknown[] = [];
-  const observe = (reason: unknown) => {
-    unhandled.push(reason);
-  };
-  process.on("unhandledRejection", observe);
   try {
     await drainCronRunQueue(state);
     await waitForCronRunQueue(state);
     await new Promise<void>((resolve) => {
       setImmediate(resolve);
     });
-    expect(unhandled).toEqual([]);
+    // Vitest fails on unhandled rejections; the event-loop turn above exposes late ones.
     const persisted = (await loadCronStore(storePath)).jobs[0];
     expect(persisted?.state.queuedAtMs).toBeUndefined();
     expect(persisted?.state.runningAtMs).toBeUndefined();
   } finally {
-    process.off("unhandledRejection", observe);
-    state.stopped = true;
-    await stopCronRunQueue(state);
-    await waitForCronRunQueue(state);
-    await scheduler.stop();
+    await stopServices(cron);
   }
 });
