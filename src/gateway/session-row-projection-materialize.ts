@@ -316,8 +316,15 @@ export function readResidentSessionRow(
     childLinks: prepared ? undefined : params.links,
   });
   inputs.subagentRunInputs = params.subagentInputs;
+  const members = params.membership;
+  const membership =
+    members &&
+    (row.membership.size !== members.length || members.some((id) => !row.membership.has(id)))
+      ? new Set(members)
+      : row.membership;
   const next = materializeSessionRow(inputs);
   const materialized =
+    membership === row.membership &&
     row.materialized?.source.entry === row.entry &&
     row.materialized.source.cfg === cfg &&
     isDeepStrictEqual(row.materialized, next)
@@ -345,7 +352,6 @@ export function readResidentSessionRow(
     databaseFacts,
   };
   const facts = row.facts?.matches(factsInput) ? row.facts : readSessionRowFacts(factsInput);
-  const members = params.membership;
   row.privateSource?.assertCurrent();
   return {
     materialized,
@@ -355,11 +361,7 @@ export function readResidentSessionRow(
       : presentation.activeModel,
     facts,
     hasBoard: facts.hasBoard,
-    membership:
-      members &&
-      (row.membership.size !== members.length || members.some((id) => !row.membership.has(id)))
-        ? new Set(members)
-        : row.membership,
+    membership,
   };
 }
 

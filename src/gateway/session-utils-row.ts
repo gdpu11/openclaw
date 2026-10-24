@@ -2,6 +2,7 @@ import {
   asNonNegativeFiniteNumber,
   asPositiveFiniteNumber,
 } from "@openclaw/normalization-core/number-coercion";
+import { omitUndefinedFields } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { SESSION_PARTICIPANT_LIMIT } from "../../packages/gateway-protocol/src/schema/session-participant.js";
 import { resolveAgentConfig } from "../agents/agent-scope.js";
@@ -441,7 +442,7 @@ export function materializeSessionRow(input: ReturnType<typeof readSessionRowInp
     };
   }
 
-  const row: GatewaySessionRow = {
+  const row = omitUndefinedFields<GatewaySessionRow>({
     key,
     sessionModelRevision: sessionModelRevision(entry, undefined, input.preparedRuntimeOwnership),
     // Only explicitly requested summaries may clear swarm state in event merges.
@@ -597,8 +598,7 @@ export function materializeSessionRow(input: ReturnType<typeof readSessionRowInp
     lastAccountId: deliveryFields.lastAccountId,
     lastThreadId: deliveryFields.lastThreadId,
     pluginExtensions: input.pluginExtensions.length > 0 ? input.pluginExtensions : undefined,
-  };
-  // Fresh rows and writer patches retain undefined fields; JSON omits them at egress.
+  });
   return Object.freeze({
     row: freezeTrustedJsonSnapshot<Readonly<GatewaySessionRow>>(row),
     source: Object.freeze({
@@ -637,7 +637,9 @@ export function replaceSessionRowFacts(
   const nextSource = source ? { ...materialized.source, ...source } : materialized.source;
   freezeTrustedJsonSnapshot(nextSource.childLinks);
   return Object.freeze({
-    row: row ? freezeTrustedJsonSnapshot({ ...materialized.row, ...row }) : materialized.row,
+    row: row
+      ? freezeTrustedJsonSnapshot(omitUndefinedFields({ ...materialized.row, ...row }))
+      : materialized.row,
     source: Object.freeze(nextSource),
   });
 }

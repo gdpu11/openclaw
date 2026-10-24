@@ -15,6 +15,10 @@ import {
 import { recordSessionParticipant as recordNativeParticipant } from "../config/sessions/session-accessor.sqlite-participants.native.js";
 import { persistSessionTranscriptTurn } from "../config/sessions/session-accessor.transcript-turn.js";
 import { recordSessionParticipantInWorker as recordSessionParticipant } from "../config/sessions/session-sharing-store.async.js";
+import {
+  addSessionMember,
+  removeSessionMember,
+} from "../config/sessions/session-sharing-store.native.js";
 import * as history from "../config/sessions/session-transcript-worker-runtime.js";
 import type { SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -66,10 +70,12 @@ it("retains materialized rows and sharing after unchanged prepared reads, but pu
       modelCatalog: [],
     });
     await projection.ensureMaterialized();
+    expect(Object.values(projection.describe(query)!.materialized.row)).not.toContain(undefined);
     // Profile patches and fresh materialization must use the same absent-field shape.
     sessionChanges.emit({ all: true, scope: "profiles" });
     const previous = projection.describe(query)!;
     const materialized = previous.materialized;
+    expect(Object.values(materialized.row)).not.toContain(undefined);
     const facts = previous.facts;
     sessionChanges.emit({ agentId: query.agentId, sessionKey: query.key, scope: "automation" });
     const sharing = projection.sharingRevision;
@@ -82,6 +88,9 @@ it("retains materialized rows and sharing after unchanged prepared reads, but pu
     for (const patch of [
       { label: "Renamed" },
       { modelOverride: "changed-model", providerOverride: "fixture" },
+      { visibility: "read-only" as const },
+      { visibility: "shared" as const },
+      { status: "failed" as const },
       { status: "done" as const },
     ]) {
       const prior = projection.describe(query)!.materialized;
@@ -94,6 +103,20 @@ it("retains materialized rows and sharing after unchanged prepared reads, but pu
       expect(projection.snapshot(query).row).toMatchObject(
         "modelOverride" in patch ? { model: "changed-model", modelProvider: "fixture" } : patch,
       );
+    }
+    const scope = { agentId: query.agentId, sessionKey: query.key };
+    for (const member of [true, false]) {
+      const prior = projection.describe(query)!.materialized;
+      const revision = projection.sharingRevision;
+      if (member) {
+        addSessionMember(scope, { identityId: "fixture-viewer", addedBy: "fixture-owner" });
+      } else {
+        removeSessionMember(scope, "fixture-viewer");
+      }
+      await projection.ensureMaterialized();
+      expect(projection.describe(query)!.membership.has("fixture-viewer")).toBe(member);
+      expect(projection.describe(query)!.materialized).not.toBe(prior);
+      expect(projection.sharingRevision).not.toBe(revision);
     }
   }, true));
 
@@ -627,6 +650,7 @@ it("searches cold archives with worker-prepared facts across publications and li
     const board = new SqliteBoardStore({
       resolveSession: ({ sessionKey }) => ({ agentId: "main", sessionKey }),
     });
+    const beforeBoard = projection.sharingRevision;
     await board.putWidget({
       sessionKey: key,
       name: "status",
@@ -635,6 +659,7 @@ it("searches cold archives with worker-prepared facts across publications and li
     expect((await list("fixture-runtime-next", true)).sessions.map((row) => row.key)).toEqual([
       key,
     ]);
+    expect(projection.sharingRevision).not.toBe(beforeBoard);
     expect((await list("fixture-runtime-next", false)).sessions).toEqual([]);
     replaceSessionEntrySync(target, { ...entry, lifecycleRevision: "replacement", updatedAt: 2 });
     expect((await list("fixture-runtime-next")).sessions).toEqual([]);
