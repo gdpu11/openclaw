@@ -10,6 +10,7 @@ import type { createProcessesPresentation } from "./chat-processes-presentation.
 /** Shared compact row; callers retain navigation and presentation policy. */
 export function ChatDetailsProcessRow(props: {
   row: SessionProcessSummary;
+  elementRef?: (instanceId: string) => (element: HTMLDivElement) => void;
   onOpen?: (instanceId?: string) => void;
   presentation: ReturnType<typeof createProcessesPresentation>;
   hoverDescription?: boolean;
@@ -38,6 +39,7 @@ export function ChatDetailsProcessRow(props: {
   );
   return (
     <div
+      ref={[props.elementRef?.(props.row.instanceId)]}
       class="chat-details-processes__row"
       role="listitem"
       data-process-id={props.row.processId}

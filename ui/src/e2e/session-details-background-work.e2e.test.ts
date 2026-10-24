@@ -1,6 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { Locator } from "playwright";
+import type { Locator, Page } from "playwright";
 import { expect, it } from "vitest";
 import type { SessionProcessSummary } from "../../../packages/gateway-protocol/src/schema/session-processes.js";
 import type { GatewaySessionRow } from "../api/types.ts";
@@ -136,6 +136,59 @@ const processes: SessionProcessSummary[] = [
   },
 ];
 
+function installBackgroundWorkGateway(page: Page, deferred = true, initialProcesses = processes) {
+  const parent: SessionFixture = {
+    key: parentKey,
+    sessionId: "details-background",
+    kind: "direct",
+    sharingRole: "owner",
+    label: "Visualize background work",
+    status: "running",
+    hasActiveRun: true,
+    hasActiveSubagentRun: true,
+    activeRunIds: ["parent-run"],
+    startedAt: now - 300_000,
+    updatedAt: now - 1_000,
+    childSessions: children.map((row) => row.key),
+  };
+  return installMockGateway(page, {
+    sessionKey: parentKey,
+    agentModel: "example/demo-model",
+    models: [{ id: "demo-model", name: "Demo model", provider: "example", contextWindow: 128000 }],
+    deferredMethods: deferred ? ["sessions.processes.list"] : [],
+    sessions: [parent, ...children],
+    historyMessages: [
+      {
+        role: "assistant",
+        content: "Delegating the review and starting the dev server.",
+        timestamp: now - 290_000,
+        __openclaw: { id: "delegating", seq: 1 },
+      },
+    ],
+    featureMethods: [
+      ...defaultControlUiFeatureMethods,
+      "sessions.processes.list",
+      "sessions.processes.stop",
+    ],
+    methodResponses: {
+      "cron.list": cronListResponseFixture({
+        jobs: [],
+        snapshotRevision: "details-background",
+        total: 0,
+        offset: 0,
+        limit: 50,
+        hasMore: false,
+        nextOffset: null,
+      }),
+      "sessions.processes.list": {
+        sessionId: "details-background",
+        processes: initialProcesses,
+        truncated: false,
+      },
+    },
+  });
+}
+
 suite.define(() => {
   it("visualizes subagents and background processes in Details", async () => {
     for (const colorScheme of ["light", "dark"] as const) {
@@ -147,58 +200,7 @@ suite.define(() => {
             ([key, themeMode]) => localStorage.setItem(key, JSON.stringify({ themeMode })),
             [controlUiBundledSettingsStorageKey(suite.server.baseUrl), colorScheme] as const,
           );
-          const parent: SessionFixture = {
-            key: parentKey,
-            sessionId: "details-background",
-            kind: "direct",
-            sharingRole: "owner",
-            label: "Visualize background work",
-            status: "running",
-            hasActiveRun: true,
-            hasActiveSubagentRun: true,
-            activeRunIds: ["parent-run"],
-            startedAt: now - 300_000,
-            updatedAt: now - 1_000,
-            childSessions: children.map((row) => row.key),
-          };
-          const gateway = await installMockGateway(page, {
-            sessionKey: parentKey,
-            agentModel: "example/demo-model",
-            models: [
-              { id: "demo-model", name: "Demo model", provider: "example", contextWindow: 128000 },
-            ],
-            deferredMethods: ["sessions.processes.list"],
-            sessions: [parent, ...children],
-            historyMessages: [
-              {
-                role: "assistant",
-                content: "Delegating the review and starting the dev server.",
-                timestamp: now - 290_000,
-                __openclaw: { id: "delegating", seq: 1 },
-              },
-            ],
-            featureMethods: [
-              ...defaultControlUiFeatureMethods,
-              "sessions.processes.list",
-              "sessions.processes.stop",
-            ],
-            methodResponses: {
-              "cron.list": cronListResponseFixture({
-                jobs: [],
-                snapshotRevision: "details-background",
-                total: 0,
-                offset: 0,
-                limit: 50,
-                hasMore: false,
-                nextOffset: null,
-              }),
-              "sessions.processes.list": {
-                sessionId: "details-background",
-                processes,
-                truncated: false,
-              },
-            },
-          });
+          const gateway = await installBackgroundWorkGateway(page);
           await page.goto(controlUiSessionUrl(suite.server.baseUrl, parentKey));
           const pane = page.locator(".chat-pane-cache__pane--active");
           const capture = async (name: string, details: Locator, content: Locator[]) => {
@@ -310,11 +312,12 @@ suite.define(() => {
               expect(await heading.textContent()).toContain("4 running");
               await processGroup.locator("[data-process-id]").first().waitFor({ state: "hidden" });
               await heading.click();
-              expect(
-                await processGroup.evaluate((element) =>
-                  element.previousElementSibling?.getAttribute("data-details-group"),
-                ),
-              ).toBe("subagents");
+              const subagentsBounds = (await details
+                .locator('[data-details-group="subagents"]')
+                .boundingBox())!;
+              expect((await processGroup.boundingBox())!.y).toBeGreaterThanOrEqual(
+                subagentsBounds.y + subagentsBounds.height,
+              );
               const first = processGroup.locator('[data-process-id="dev-server"]');
               const stop = first.getByRole("button", {
                 name: "Stop Background terminal",
@@ -619,6 +622,231 @@ suite.define(() => {
           ).toBe("true");
           await expect.poll(() => collection.locator("[data-session-key]").count()).toBe(6);
           expect(await gateway.getRequests("chat.send")).toHaveLength(0);
+        },
+      );
+    }
+  });
+
+  it("moves only changed process instances and keeps one height owner through interruption", async () => {
+    for (const width of [1728, 390]) {
+      await suite.withPage(
+        { viewport: { width, height: 1100 }, reducedMotion: "reduce" },
+        async ({ page }) => {
+          const gateway = await installBackgroundWorkGateway(page, false, []);
+          await page.goto(controlUiSessionUrl(suite.server.baseUrl, parentKey));
+          const pane = page.locator(".chat-pane-cache__pane--active");
+          const details = await openChatDetails(pane);
+          const group = details.locator('[data-details-group="processes"]');
+          const envelope = details.locator(".chat-details-processes__envelope");
+          const rows = group.locator("[data-process-id]");
+          await expect
+            .poll(async () => (await gateway.getRequests("sessions.processes.list")).length)
+            .toBeGreaterThan(0);
+          await details
+            .getByRole("button", { name: "All subagents. 2 Working, 4 Done", exact: true })
+            .waitFor();
+          const frame = () =>
+            page.evaluate(
+              () =>
+                new Promise<void>((resolve) => {
+                  requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+                }),
+            );
+          await frame();
+          await page.emulateMedia({ reducedMotion: "no-preference" });
+          await frame();
+          // Pause only the preview's actual animations so geometric assertions do not race CI frames.
+          const control = await page.evaluateHandle(() => {
+            const animations: Animation[] = [];
+            // Preserve the native method before replacing it; call below supplies its receiver.
+            // oxlint-disable-next-line typescript/unbound-method
+            const animate = Element.prototype.animate;
+            Element.prototype.animate = function (frames, options) {
+              const animation = animate.call(this, frames, options);
+              if (this.matches(".chat-details-processes__row, .chat-details-processes__envelope")) {
+                animation.pause();
+                animation.currentTime = 0;
+                animations.push(animation);
+              }
+              return animation;
+            };
+            return { animations };
+          });
+          const advance = async (time: number) => {
+            await control.evaluate(({ animations }, positionMs) => {
+              for (const animation of animations) {
+                if (animation.playState === "idle") {
+                  continue;
+                }
+                animation.currentTime = positionMs;
+                if (positionMs === 150) {
+                  animation.finish();
+                }
+              }
+            }, time);
+            await frame();
+          };
+          const created = () => control.evaluate(({ animations }) => animations.length);
+          const publish = async (next: SessionProcessSummary[], expected: string[]) => {
+            await gateway.setMethodResponse("sessions.processes.list", {
+              sessionId: "details-background",
+              processes: next,
+              truncated: false,
+            });
+            await gateway.emitGatewayEvent("sessions.processes.changed", {
+              sessionKey: parentKey,
+              agentId: "main",
+            });
+            await expect
+              .poll(() =>
+                rows.evaluateAll((elements) =>
+                  elements.map((element) => element.getAttribute("data-process-id")),
+                ),
+              )
+              .toEqual(expected);
+            await frame();
+          };
+          let currentProcesses = processes;
+          const finishThrough = (index: number) =>
+            currentProcesses.map((row, i) =>
+              i <= index
+                ? { ...row, status: "completed" as const, canStop: false, endedAt: now }
+                : row,
+            );
+          expect(await envelope.count()).toBe(0);
+          await publish(
+            processes,
+            width === 1728
+              ? ["dev-server", "watch-tests", "watch-assets"]
+              : ["dev-server", "watch-tests"],
+          );
+          expect(await created()).toBeGreaterThan(0);
+          expect((await envelope.boundingBox())!.height).toBe(0);
+          await advance(150);
+          if (width === 1728) {
+            await page.setViewportSize({ width: 1600, height: 1100 });
+            await frame();
+          }
+          const initial = await rows.elementHandles();
+          const firstY = (await initial[0]!.boundingBox())!.y;
+          const beforeB = (await initial[1]!.boundingBox())!.y;
+          await publish(
+            finishThrough(0),
+            width === 1728
+              ? ["watch-tests", "watch-assets", "watch-docs"]
+              : ["watch-tests", "watch-assets"],
+          );
+          expect(await initial[0]!.evaluate((element) => element.isConnected)).toBe(false);
+          expect(await initial[1]!.evaluate((element) => element.isConnected)).toBe(true);
+          expect((await initial[1]!.boundingBox())!.y).toBeCloseTo(beforeB, 0);
+          await advance(75);
+          const middleB = (await initial[1]!.boundingBox())!.y;
+          expect(middleB).toBeGreaterThan(firstY);
+          expect(middleB).toBeLessThan(beforeB);
+          const survivor = await rows
+            .filter({ has: page.locator('[aria-label^="watch-assets."]') })
+            .elementHandle();
+          const survivorY = (await survivor!.boundingBox())!.y;
+          const stop = await initial[1]!.$(".chat-details-processes__stop");
+          const stopBounds = (await stop!.boundingBox())!;
+          await page.mouse.move(
+            stopBounds.x + stopBounds.width / 2,
+            stopBounds.y + stopBounds.height / 2,
+          );
+          await page.mouse.down();
+          await publish(finishThrough(1), ["watch-assets", "watch-docs"]);
+          expect(await survivor!.evaluate((element) => element.isConnected)).toBe(true);
+          expect((await survivor!.boundingBox())!.y).toBeCloseTo(survivorY, 0);
+          await advance(150);
+          await page.mouse.up();
+          expect(await gateway.getRequests("sessions.processes.stop")).toHaveLength(0);
+          await stop!.dispose();
+          const beforeLog = await created();
+          const logRows = structuredClone(finishThrough(1));
+          for (const row of logRows) {
+            row.tail += "\nnew output";
+          }
+          await publish(logRows, ["watch-assets", "watch-docs"]);
+          expect(await created()).toBe(beforeLog);
+          await publish(finishThrough(2), ["watch-docs"]);
+          await advance(150);
+          const oneHeight = (await envelope.boundingBox())!.height;
+          await publish(finishThrough(3), []);
+          expect(await envelope.count()).toBe(1);
+          expect(await envelope.locator("button, a[href], [tabindex='0']").count()).toBe(0);
+          await advance(75);
+          expect((await envelope.boundingBox())!.height).toBeGreaterThan(0);
+          expect((await envelope.boundingBox())!.height).toBeLessThan(oneHeight);
+          currentProcesses = structuredClone(processes);
+          for (const row of currentProcesses) {
+            row.instanceId += ":next";
+          }
+          await publish(
+            currentProcesses,
+            width === 1728
+              ? ["dev-server", "watch-tests", "watch-assets"]
+              : ["dev-server", "watch-tests"],
+          );
+          await advance(150);
+          expect(await rows.count()).toBe(width === 1728 ? 3 : 2);
+          if (width === 1728) {
+            const body = group.locator(".chat-details-desktop-section__body");
+            const heading = group.locator(":scope > summary");
+            await heading.click();
+            await frame();
+            await body.evaluate((element) =>
+              element.getAnimations().forEach((animation) => animation.finish()),
+            );
+            await frame();
+            await heading.click();
+            await frame();
+            await body.evaluate((element) => {
+              const animation = element.getAnimations()[0]!;
+              animation.pause();
+              animation.currentTime = 150;
+            });
+            const beforeManual = await created();
+            await publish(finishThrough(0), ["watch-tests", "watch-assets", "watch-docs"]);
+            expect(await created()).toBe(beforeManual);
+            expect(await envelope.evaluate((element) => element.getAnimations().length)).toBe(0);
+            await body.evaluate((element) =>
+              element.getAnimations().forEach((animation) => animation.finish()),
+            );
+            await frame();
+          }
+          const beforeShrink = (await envelope.boundingBox())!.height;
+          await publish(finishThrough(2), ["watch-docs"]);
+          expect((await envelope.boundingBox())!.height).toBeCloseTo(beforeShrink, 0);
+          await gateway.deferNext("sessions.processes.list");
+          await gateway.emitGatewayEvent("sessions.processes.changed", {
+            sessionKey: parentKey,
+            agentId: "main",
+          });
+          await gateway.rejectDeferred("sessions.processes.list", {
+            code: "FORBIDDEN",
+            message: "Process access removed",
+          });
+          await frame();
+          expect(await envelope.count()).toBe(0);
+          await publish(
+            currentProcesses,
+            width === 1728
+              ? ["dev-server", "watch-tests", "watch-assets"]
+              : ["dev-server", "watch-tests"],
+          );
+          await advance(150);
+          await page.emulateMedia({ reducedMotion: "reduce" });
+          await frame();
+          const beforeReduced = await created();
+          await publish(finishThrough(2), ["watch-docs"]);
+          expect(await created()).toBe(beforeReduced);
+          await publish(finishThrough(3), []);
+          expect(await envelope.count()).toBe(0);
+          await control.dispose();
+          for (const element of initial) {
+            await element.dispose();
+          }
+          await survivor?.dispose();
         },
       );
     }

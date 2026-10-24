@@ -66,7 +66,6 @@ export type ChatDetailsMobileRootProps = {
     | "people"
     | "taskProgress"
     | "subagents"
-    | "processes"
     | "environment"
     | "context"
     | "pullRequests"
@@ -82,9 +81,8 @@ export type ChatDetailsMobileRootProps = {
   taskProgress?: ChatDetailsMobileEntry;
   taskProgressNotice?: JSX.Element;
   subagents?: Omit<ChatDetailsSubagentsProps, "mobile" | "collapsed">;
-  /** Mobile content without another section heading or scroll container. */
+  /** Complete Processes section; its owner retains the empty exit envelope. */
   processes?: JSX.Element;
-  processesCount?: string;
   /** The complete mobile Environment section, including its own heading and group. */
   environment?: JSX.Element;
   pullRequests?: ChatPullRequestMobileCollectionProps & { summary: ChatDetailsMobileEntry };
@@ -106,7 +104,6 @@ function RootGroup(props: {
   label: string;
   name: string;
   heading?: boolean;
-  count?: string;
   children: JSX.Element;
 }) {
   return (
@@ -116,12 +113,7 @@ function RootGroup(props: {
       aria-label={props.label}
     >
       <Show when={props.heading !== false}>
-        <h3 class="chat-details-mobile-root__heading">
-          {props.label}
-          {props.count !== undefined && (
-            <span class="chat-details-mobile-root__count">{props.count}</span>
-          )}
-        </h3>
+        <h3 class="chat-details-mobile-root__heading">{props.label}</h3>
       </Show>
       <div class="chat-details-mobile-root__group">{props.children}</div>
     </section>
@@ -343,11 +335,7 @@ export function ChatDetailsMobileRoot(props: ChatDetailsMobileRootProps) {
           </RootGroup>
         )}
       </Show>
-      <Show when={props.processes}>
-        <RootGroup name="processes" label={props.labels.processes} count={props.processesCount}>
-          {props.processes}
-        </RootGroup>
-      </Show>
+      {props.processes}
     </div>
   );
 }

@@ -10,7 +10,8 @@
 .chat-details-mobile-root {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  --details-group-gap: 16px;
+  gap: var(--details-group-gap);
   min-width: 0;
   padding: 12px 14px 24px;
   color: var(--text);
@@ -423,4 +424,14 @@
 .chat-details-mobile-processes .chat-details__process-elapsed {
   color: var(--muted);
   font: 400 12px/18px var(--font-body);
+}
+
+.chat-details-mobile-root > .chat-details-processes__envelope:not(:first-child) {
+  margin-block-start: calc(-1 * var(--details-group-gap));
+}
+.chat-details-mobile-root
+  > .chat-details-processes__envelope:not(:first-child)
+  > .chat-details-processes__motion-content
+  > .chat-details-mobile-root__section {
+  padding-block-start: var(--details-group-gap);
 }

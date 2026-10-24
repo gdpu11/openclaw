@@ -1,4 +1,4 @@
-import { Errored, For, Loading, Show, createMemo, isPending, latest } from "solid-js";
+import { Errored, For, Loading, Show, createMemo, createSignal, isPending, latest } from "solid-js";
 import type { SessionProcessSummary } from "../../../../../packages/gateway-protocol/src/schema/session-processes.js";
 import { ElapsedTime } from "../../../components/elapsed-time.tsx";
 import { Icon } from "../../../components/solid/icon.tsx";
@@ -6,6 +6,7 @@ import { useScrollState } from "../../../components/solid/scroll-state.ts";
 import { registerChatDetailsEnglish } from "../../../i18n/locales/en-chat-details.ts";
 import { registerChatSessionEnglish } from "../../../i18n/locales/en-chat-session.ts";
 import { registerEnglishCatalog, t } from "../../../lib/reactive/i18n.ts";
+import { createKeyedListMotion } from "../../../lib/reactive/keyed-list-motion.ts";
 import type { ProcessesPanelData } from "../processes-panel-data.ts";
 import "./chat-details-processes.css";
 import { ChatDetailsDesktopSection } from "./chat-details-desktop-section.tsx";
@@ -29,6 +30,7 @@ function ProcessRow(props: {
   presentation: ReturnType<typeof createProcessesPresentation>;
   presented: boolean;
   onOpen: () => void;
+  elementRef: (instanceId: string) => (element: HTMLDivElement) => void;
 }) {
   const stop = createMemo(() => props.presentation.createStop(() => props.row));
   const nameOverflow = useScrollState(true, false, { revision: () => props.row.name });
@@ -41,6 +43,7 @@ function ProcessRow(props: {
   const description = () => `${props.row.name}. ${status()}`;
   return (
     <div
+      ref={[props.elementRef(props.row.instanceId)]}
       class="chat-details-processes__row"
       role="listitem"
       data-process-id={props.row.processId}
@@ -100,6 +103,15 @@ export function ChatDetailsProcesses(props: Props) {
   const presentation = createProcessesPresentation(() => props.processes(), true);
   const snapshot = () => props.processes()?.snapshot;
   const rows = createDetailsProcessesPresentation(() => snapshot()?.rows ?? []);
+  const visibleRows = createMemo(() => rows().slice(0, 3));
+  const [revealing, setRevealing] = createSignal(false);
+  const motion = createKeyedListMotion({
+    ids: () => visibleRows().map((row) => row.instanceId),
+    scope: presentation.scope,
+    ready: () => Boolean(snapshot()?.hasResult),
+    active: () =>
+      props.presented && props.expanded && !revealing() && snapshot()?.errorKind !== "access",
+  });
   const open = (instanceId?: string) => {
     if (props.presented) {
       props.onOpen?.(instanceId);
@@ -136,10 +148,11 @@ export function ChatDetailsProcesses(props: Props) {
             role="list"
             aria-label={t("chat.sessionDetails.processes")}
           >
-            <For each={rows().slice(0, 3)} keyed={(row) => row.instanceId}>
+            <For each={visibleRows()} keyed={(row) => row.instanceId}>
               {(row) => (
                 <ProcessRow
                   row={row()}
+                  elementRef={motion.row}
                   presentation={presentation}
                   presented={props.presented}
                   onOpen={() => open(row().instanceId)}
@@ -181,21 +194,28 @@ export function ChatDetailsProcesses(props: Props) {
   // The disclosure's layout owner must survive pending and errored body reads.
   return (
     <Show when={props.onOpen}>
-      <Show when={hasRunning()} fallback={<ReadContent />}>
-        <ChatDetailsDesktopSection
-          section="processes"
-          title={t("chat.sessionDetails.processes")}
-          metadata={
-            <span class="chat-details-desktop-section__count">
-              {t("chat.processesPanel.runningCount", { count: String(rows().length) })}
-            </span>
-          }
-          expanded={props.expanded}
-          presented={props.presented}
-          onExpandedChange={(expanded) => props.onExpandedChange(expanded)}
-        >
-          <ReadContent />
-        </ChatDetailsDesktopSection>
+      <Show when={motion.present()} fallback={<ReadContent />}>
+        <div ref={motion.shell} class="chat-details-processes__envelope">
+          <div ref={motion.content} class="chat-details-processes__motion-content">
+            <Show when={hasRunning()}>
+              <ChatDetailsDesktopSection
+                section="processes"
+                title={t("chat.sessionDetails.processes")}
+                metadata={
+                  <span class="chat-details-desktop-section__count">
+                    {t("chat.processesPanel.runningCount", { count: String(rows().length) })}
+                  </span>
+                }
+                expanded={props.expanded}
+                presented={props.presented}
+                onExpandedChange={(expanded) => props.onExpandedChange(expanded)}
+                onRevealMotionChange={setRevealing}
+              >
+                <ReadContent />
+              </ChatDetailsDesktopSection>
+            </Show>
+          </div>
+        </div>
       </Show>
     </Show>
   );

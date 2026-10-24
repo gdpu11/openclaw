@@ -127,13 +127,14 @@ function MobileHostContent(
     if (!data) {
       return undefined;
     }
-    const { error, errorKind, loading } = data.snapshot;
+    const { error, errorKind, loading, hasResult } = data.snapshot;
     return {
       rows: detailsProcesses(),
       presentation: processPresentation,
       error,
       errorKind,
       loading,
+      hasResult,
       refresh: () => data.refresh(),
     };
   });
@@ -263,7 +264,6 @@ function MobileHostContent(
           people: t("chat.mobileDetails.people"),
           taskProgress: t("sessionProgressCard.composerTitle"),
           subagents: t("chat.sessionDetails.subagents"),
-          processes: t("chat.sessionDetails.processes"),
           environment: t("chat.sessionDetails.environment"),
           context: t("chat.sessionDetails.context"),
           pullRequests: t("sessionHovercard.pullRequests"),
