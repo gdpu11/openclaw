@@ -47,6 +47,33 @@ describe("parseCliJsonl", () => {
     });
   });
 
+  it("keeps streamed pre-tool text over the final-message result in transcript reparses", () => {
+    const result = parseCliJsonl(
+      joinJsonlFrames(
+        { type: "init", session_id: "session-reparse" },
+        claudeMessageStart(),
+        claudeTextDelta("Marker caribou-lampion-473 explanation."),
+        claudeStreamEvent({
+          type: "content_block_start",
+          content_block: { type: "tool_use", id: "tool-1", name: "session_status" },
+        }),
+        claudeStreamEvent({ type: "message_stop" }),
+        claudeMessageStart(),
+        claudeTextDelta("TEST DONE"),
+        { type: "result", session_id: "session-reparse", result: "TEST DONE" },
+      ),
+      createClaudeBackend("local-cli"),
+      "local-cli",
+    );
+
+    expect(result).toEqual({
+      text: "Marker caribou-lampion-473 explanation.\n\nTEST DONE",
+      rawFinalText: "TEST DONE",
+      sessionId: "session-reparse",
+      usage: undefined,
+    });
+  });
+
   const stopHookFeedback = {
     type: "user",
     message: { role: "user", content: [{ type: "text", text: "Stop hook feedback:\nRewrite." }] },
@@ -172,6 +199,37 @@ describe("parseCliJsonl", () => {
     );
 
     expect(result.text).toBe("C");
+  });
+
+  it("continues transcript reparses past an interim result", () => {
+    const result = parseCliJsonl(
+      joinJsonlFrames(
+        { type: "init", session_id: "session-interim-reparse" },
+        claudeMessageStart(),
+        claudeTextDelta("Interim answer."),
+        {
+          type: "result",
+          session_id: "session-interim-reparse",
+          result: "Interim answer.",
+        },
+        claudeMessageStart(),
+        claudeTextDelta("Pre-tool follow-up."),
+        claudeStreamEvent({
+          type: "content_block_start",
+          content_block: { type: "tool_use", id: "tool-2", name: "session_status" },
+        }),
+        claudeTextDelta("DONE"),
+        {
+          type: "result",
+          session_id: "session-interim-reparse",
+          result: "DONE",
+        },
+      ),
+      createClaudeBackend("local-cli"),
+      "local-cli",
+    );
+
+    expect(result?.text).toBe("Interim answer.\nPre-tool follow-up.\n\nDONE");
   });
 
   it.each([
