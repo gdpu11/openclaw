@@ -1,5 +1,5 @@
 {
-  "startupJsGzipBytes": 281233,
-  "reason": "Token-to-DOM Markdown: Peter accepted chat boot +2374 B for measured streaming script CPU -8.6% and HTML parses 2129 to 178; startup 281233 B (+38 B build variance), 7 JS + 1 CSS.",
+  "startupJsGzipBytes": 281299,
+  "reason": "Shared visible clocks: 20 interleaved pairs reduced script CPU median 9.6% desktop and 12.9% mobile, with both p95s improved. Against 4d49d348, startup is 281299 B (+115 B), New Session +133 B, chat -213 B, and request counts unchanged. Accept the sub-0.5 KB CPU tradeoff and ratchet to the measured head.",
   "updatedAt": "2026-10-24"
 }
