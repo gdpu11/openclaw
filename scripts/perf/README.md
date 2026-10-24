@@ -4608,8 +4608,9 @@ on any invalid pair or guard failure, preserving the failed pair for diagnosis.
 The other side uses a separate fixture, output and loopback port, the same
 `--sync` prefix, and `--side fix`. Each side writes
 `<prefix>.wave-0.<side>.ready` after its measured Gateway and writer socket are
-ready. The coordinator waits for both ready files, assigns the task-owned
-scopes to their interleaved measurement CPUs, then writes a future epoch in
+ready. Each task-owned scope starts on its assigned 16 interleaved CPUs so the
+Gateway sizes its workers for 16 CPUs from startup. The coordinator waits for
+both ready files, then writes a future epoch in
 milliseconds to `<prefix>.wave-0.go`. Missing or missed starts fail the run.
 Keep the shared quiet lock and production guard around the concurrent pair;
 swap both launch order and CPU placement on the next pair. Build and fixture

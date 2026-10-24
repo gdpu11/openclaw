@@ -46,7 +46,7 @@ try:
   for d in ['home','tmp']: (task_dir/d).mkdir(exist_ok=True)
   log=(task_dir/'measure.log').open('w');logs.append(log)
   # Board widgets reserve Gateway port + 1 for the MCP App sandbox listener.
-  cmd=['systemd-run','--scope','--quiet',f'--unit={units[side]}','-p','AllowedCPUs=0-63','-p','CPUWeight=10','-p','IOWeight=10','-p','MemoryMax=24G','nice','-n','10','ionice','-c3','env',f'HOME={task_dir}/home',f'OPENCLAW_HOME={task_dir}/home',f'TMPDIR={task_dir}/tmp','node','--enable-source-maps','--import','./scripts/tsx.mjs','scripts/perf/reconnect-read-wave-measure.ts','--root',str(task_dir/'state'),'--output',str(task_dir/'output'),'--entry',str(entry.resolve()),'--clients','65','--port',str(41669 if side=='base' else 41679),'--sync',str(prefix),'--side',side]
+  cmd=['systemd-run','--scope','--quiet',f'--unit={units[side]}','-p',f'AllowedCPUs={meta["cpus"][side]}','-p','CPUWeight=10','-p','IOWeight=10','-p','MemoryMax=24G','nice','-n','10','ionice','-c3','env',f'HOME={task_dir}/home',f'OPENCLAW_HOME={task_dir}/home',f'TMPDIR={task_dir}/tmp','node','--enable-source-maps','--import','./scripts/tsx.mjs','scripts/perf/reconnect-read-wave-measure.ts','--root',str(task_dir/'state'),'--output',str(task_dir/'output'),'--entry',str(entry.resolve()),'--clients','65','--port',str(41669 if side=='base' else 41679),'--sync',str(prefix),'--side',side]
   if a.retention: cmd.append('--retention')
   # nice is additive: reset only this new launcher before requesting workload priority 10.
   children[side]=subprocess.Popen(cmd,cwd=a.checkout,stdout=log,stderr=subprocess.STDOUT,preexec_fn=lambda:os.setpriority(os.PRIO_PROCESS,0,0))
@@ -57,7 +57,6 @@ try:
    assert time.monotonic()<deadline,'pair startup/wave synchronization timed out'
    for side,proc in children.items(): assert proc.poll() is None,f'{side} exited before wave {wave} ready'
    time.sleep(.1)
-  for side,cpu in zip(['base','fix'],cpus): subprocess.run(['systemctl','set-property','--runtime',units[side],f'AllowedCPUs={cpu}'],check=True)
   at=int(time.time()*1000)+2500
   Path(f'{prefix}.wave-{wave}.go').write_text(str(at))
   meta['sync'].append({'wave':wave,'startEpochMs':at,'ready':[json.loads(f.read_text()) for f in files]})
