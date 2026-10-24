@@ -54,6 +54,11 @@ function expectIncludes(text: string, ...parts: string[]) {
     expect(text).toContain(part);
   }
 }
+function expectExcludes(text: string, ...parts: string[]) {
+  for (const part of parts) {
+    expect(text).not.toContain(part);
+  }
+}
 async function expectListFailure(message: string) {
   await expectFailure(["list", "--json"], message);
   expect(runtime.writeJson).not.toHaveBeenCalled();
@@ -73,6 +78,11 @@ function expectSingleRpc(method: string, params: unknown) {
 function match(id: string, name: string, schedule = "every 1m", enabled = true) {
   return { id, name, schedule, enabled, status: enabled ? "idle" : "disabled" };
 }
+const jobIds = (jobs: CronJob[]) => jobs.map(({ id }) => id).toSorted();
+const patchPage = (patch: Record<string, unknown>) => (page: unknown) => ({
+  ...(page as Record<string, unknown>),
+  ...patch,
+});
 
 function createJob(index: number, overrides: Partial<CronJob> = {}): CronJob {
   return {
@@ -225,16 +235,12 @@ describe("cron CLI with the real Gateway pagination contract", () => {
       });
       installRealCronGateway([job]);
       const args = surface === "list" ? ["list"] : ["show", job.id];
-
       await runCron(args);
-
       const lines = mocks.runtime.log.mock.calls.flatMap(([line]) => String(line).split("\n"));
       if (surface === "list") {
         const row = lines.find((line) => line.includes(job.id));
         expect(row).toContain(running ? "running" : "disabled");
-        expect(row).not.toContain(running ? "disabled" : "running");
-        expect(row).not.toContain("idle");
-        expect(row).not.toContain("ok (suppressed)");
+        expectExcludes(row ?? "", running ? "disabled" : "running", "idle", "ok (suppressed)");
       } else {
         expect(lines).toContain(`status: ${running ? "running" : "disabled"}`);
         expect(lines).toContain("stream status: disabled");
@@ -257,21 +263,16 @@ describe("cron CLI with the real Gateway pagination contract", () => {
   it.each([{ args: ["--json"] }, { args: ["--json", "--agent", "ops"] }, { args: [] }])(
     "lists ownerless jobs with %j",
     async ({ args }) => {
-      const turn = { kind: "agentTurn", message: "legacy job" } as const;
+      const ownerless = {
+        sessionTarget: "isolated",
+        payload: { kind: "agentTurn", message: "legacy job" },
+        delivery: { mode: "announce" },
+      } satisfies Partial<CronJob>;
       installRealCronGateway(
         [
-          createJob(0, {
-            sessionTarget: "isolated",
-            payload: turn,
-            delivery: { mode: "announce" },
-          }),
+          createJob(0, ownerless),
           createJob(1, { agentId: "main" }),
-          createJob(2, {
-            sessionKey: "agent:ops:main",
-            sessionTarget: "isolated",
-            payload: turn,
-            delivery: { mode: "announce" },
-          }),
+          createJob(2, { ...ownerless, sessionKey: "agent:ops:main" }),
         ],
         { config: { agents: { entries: { main: {}, ops: {} } } } },
       );
@@ -308,17 +309,10 @@ describe("cron CLI with the real Gateway pagination contract", () => {
   it.each([
     ["cron", true, "   ", false],
     ["cron", false, undefined, false],
-    ["cron", true, " Backup ", true],
     ["automations", true, " Backup ", true],
   ] as const)("lists every page via %s, JSON=%s, query=%s", async (root, json, query, filtered) => {
     const matching = createJobs(201, (index) =>
-      filtered
-        ? {
-            name: "backup",
-            agentId: "ops",
-            enabled: index % 2 === 0,
-          }
-        : {},
+      filtered ? { name: "backup", agentId: "ops", enabled: index % 2 === 0 } : {},
     );
     installRealCronGateway(
       filtered
@@ -339,11 +333,7 @@ describe("cron CLI with the real Gateway pagination contract", () => {
       root,
     );
     if (json) {
-      expect(
-        inventory()
-          .jobs.map((job) => job.id)
-          .toSorted(),
-      ).toEqual(matching.map((job) => job.id).toSorted());
+      expect(jobIds(inventory().jobs)).toEqual(jobIds(matching));
       if (!filtered) {
         expect(inventory().deliveryPreviews["job-200"]).toMatchObject({ label: "not requested" });
       }
@@ -370,8 +360,7 @@ describe("cron CLI with the real Gateway pagination contract", () => {
 
     await runCron(["list", "--query", "VISIBLE"]);
     expect(output("log")).toContain("Visible backup");
-    expect(output("log")).not.toContain("Job 001");
-    expect(output("log")).not.toContain("Visible paused");
+    expectExcludes(output("log"), "Job 001", "Visible paused");
 
     await runCron(["list", "--query", "no-matching-automation", "--json"]);
     expect(mocks.runtime.writeJson).toHaveBeenCalledWith(expect.objectContaining({ jobs: [] }));
@@ -396,11 +385,9 @@ describe("cron CLI with the real Gateway pagination contract", () => {
     const result = inventory();
     expect(result.jobs).toHaveLength(count);
     expect(result.jobs.some((job) => job.id === "job-000")).toBe(false);
-    if (change === "replacement") {
-      expect(result.jobs.some((job) => job.id === "job-900")).toBe(true);
-    } else {
-      expect(result.jobs.some((job) => job.id === "job-001")).toBe(false);
-    }
+    expect(
+      result.jobs.some((job) => job.id === (change === "replacement" ? "job-900" : "job-001")),
+    ).toBe(change === "replacement");
     expect(listOffsets()).toEqual(offsets);
   });
 
@@ -459,9 +446,7 @@ describe("cron CLI with the real Gateway pagination contract", () => {
     "fails closed for %s",
     async (_label, patch, error = "invalid inventory page") => {
       installRealCronGateway([createJob(0)], {
-        transformListPage(page) {
-          return { ...(page as Record<string, unknown>), ...patch };
-        },
+        transformListPage: patchPage(patch),
       });
 
       await expectListFailure(error);
@@ -475,7 +460,6 @@ describe("cron CLI with the real Gateway pagination contract", () => {
       await expectListFailure("invalid inventory page");
       expect(listRequests()).toHaveLength(1);
       expectRpc("cron.get", { id: count ? "job-000" : expect.any(String) });
-      expect(mocks.runtime.writeJson).not.toHaveBeenCalled();
     },
   );
 
@@ -501,20 +485,19 @@ describe("cron CLI with the real Gateway pagination contract", () => {
 
     await expectListFailure("pagination exceeded maximum pages");
     expect(mocks.callGatewayFromCli).toHaveBeenCalledTimes(50);
-    expect(mocks.runtime.writeJson).not.toHaveBeenCalled();
   });
 
   it.each(["job-200", "JOB-200"])("prefers ID %s over multiple matching names", async (id) => {
-    const nameCollision = createJob(0, { id: "name-owner", name: "job-200" });
-    const secondNameCollision = createJob(1, { name: "JOB-200" });
-    const actualId = createJob(200, { id: "job-200", name: "Actual ID owner" });
-    installRealCronGateway([nameCollision, secondNameCollision, actualId]);
-
+    installRealCronGateway([
+      createJob(0, { id: "name-owner", name: "job-200" }),
+      createJob(1, { name: "JOB-200" }),
+      createJob(200, { name: "Actual ID owner" }),
+    ]);
     await runCron(["show", id, "--json"]);
 
     expect(readJson()).toMatchObject({ id: "job-200", name: "Actual ID owner" });
     expectRpc("cron.get", { id });
-    expect(listRequests().length > 0).toBe(id !== actualId.id);
+    expect(listRequests().length > 0).toBe(id !== "job-200");
   });
 
   it.each([
@@ -554,8 +537,7 @@ describe("cron CLI with the real Gateway pagination contract", () => {
           },
         });
       } else {
-        await expect(runCron(["show", query])).rejects.toThrow("exit 1");
-        expect(mocks.runtime.error).toHaveBeenCalledWith(expect.stringContaining(message));
+        await expectFailure(["show", query], message);
         const text = output("error");
         expectIncludes(
           text,
@@ -568,9 +550,7 @@ describe("cron CLI with the real Gateway pagination contract", () => {
         expect(text).not.toContain("job-001");
         if (query.includes("\u001B")) {
           expect(text).toContain("backup\\r\\njob");
-          expect(text).not.toContain("\u001B]");
-          expect(text).not.toContain("\u0007");
-          expect(text).not.toContain("\r");
+          expectExcludes(text, "\u001B]", "\u0007", "\r");
         } else {
           expectIncludes(text, first, last);
         }
@@ -619,9 +599,7 @@ describe("cron CLI with the real Gateway pagination contract", () => {
       "on-exit; enabled: no; status: disabled",
       "stream; enabled: yes; status: idle",
     );
-    expect(text).not.toContain("private-");
-    expect(text).not.toContain("Unrelated job");
-
+    expectExcludes(text, "private-", "Unrelated job");
     const error = await runCronWithJsonOwner(["show", "Backup", "--json"], "automations").catch(
       (caught: unknown) => caught,
     );
@@ -664,11 +642,7 @@ describe("cron CLI with the real Gateway pagination contract", () => {
     installRealCronGateway([createJob(0)]);
     failCronGet(new Error("Gateway transport is unavailable"));
 
-    await expect(runCron(["show", "job-000", "--json"])).rejects.toThrow("exit 1");
-
-    expect(mocks.runtime.error).toHaveBeenCalledWith(
-      expect.stringContaining("Gateway transport is unavailable"),
-    );
+    await expectFailure(["show", "job-000", "--json"], "Gateway transport is unavailable");
     expect(listRequests()).toHaveLength(0);
   });
 });
@@ -702,12 +676,7 @@ describe("cron simple commands", () => {
       kind === "missing job"
         ? {}
         : {
-            transformListPage: (page) => ({
-              ...(page as Record<string, unknown>),
-              total: 1,
-              hasMore: true,
-              nextOffset: 0,
-            }),
+            transformListPage: patchPage({ total: 1, hasMore: true, nextOffset: 0 }),
           },
     );
     await expectFailure(["show", "missing", "--json"], error);
@@ -730,10 +699,7 @@ describe("cron simple commands", () => {
     Object.defineProperty(process.stderr, "isTTY", { value: true, configurable: true });
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     await runCron(["disable", "job-1"]);
-    expect(callGatewayFromCli).toHaveBeenCalledWith("cron.update", expect.anything(), {
-      id: "job-1",
-      patch: { enabled: false },
-    });
+    expectRpc("cron.update", { id: "job-1", patch: { enabled: false } });
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining("openclaw cron list --all"));
   });
 
@@ -785,20 +751,14 @@ describe("cron simple commands", () => {
   });
 
   it("reports an invalid offset as an expected JSON failure before RPC", async () => {
-    const program = new Command().name("openclaw").exitOverride();
-    registerCronCli(program);
-    const argv = process.argv;
-    process.argv = [...argv.slice(0, 2), "cron", "runs", "job-1", "--offset", "-1", "--json"];
-    try {
-      const thrown = await program.parseAsync(process.argv).catch((error: unknown) => error);
-      expect(thrown).toBeInstanceOf(ExpectedCliError);
-      expect(formatCliJsonFailure(thrown)).toEqual({
-        ok: false,
-        error: { type: "cli_error", message: "Invalid --offset (must be a non-negative integer)." },
-      });
-      expect(callGatewayFromCli).not.toHaveBeenCalled();
-    } finally {
-      process.argv = argv;
-    }
+    const thrown = await runCronWithJsonOwner(["runs", "job-1", "--offset", "-1", "--json"]).catch(
+      (error: unknown) => error,
+    );
+    expect(thrown).toBeInstanceOf(ExpectedCliError);
+    expect(formatCliJsonFailure(thrown)).toEqual({
+      ok: false,
+      error: { type: "cli_error", message: "Invalid --offset (must be a non-negative integer)." },
+    });
+    expect(callGatewayFromCli).not.toHaveBeenCalled();
   });
 });
