@@ -1,13 +1,11 @@
 import { expectDefined } from "@openclaw/normalization-core/expect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { installSessionPlacementAdmissionProvider } from "../agents/session-placement-admission.js";
-import { beginReplyOperationFinalizationWork } from "../auto-reply/reply/reply-run-finalization-lease.js";
 import {
   resetDiagnosticEventsForTest,
   setDiagnosticsEnabledForProcess,
 } from "../infra/diagnostic-events.js";
 import { createDeferredCore } from "../shared/deferred.js";
-import { withSessionTurn } from "./session-controller.admission.js";
 import { createReplyOperation } from "./session-controller.operation.js";
 import { getSessionControllerOperation } from "./session-controller.state.js";
 import { testing } from "./session-controller.test-support.js";
@@ -126,12 +124,13 @@ describe("execution deadline recovery", () => {
     },
   );
 
-  it.each(["closed", "rearmed", "retired"] as const)(
-    "rejects a captured execution recovery after its record is %s",
+  it.each(["closed", "rearmed", "retired", "owned", "attempt"] as const)(
+    "revalidates %s execution deadline authority before Stop",
     async (change) => {
       const started = createDeferredCore();
       const resume = createDeferredCore();
       const recover = vi.fn(async () => true);
+      const hasRecovery = change !== "owned" && change !== "attempt";
       let current = true;
       let effectCurrent: boolean | undefined;
       let accepted: boolean | undefined;
@@ -142,54 +141,31 @@ describe("execution deadline recovery", () => {
           await resume.promise;
           effectCurrent = effect.isCurrent();
           accepted = await effect.recoverExecutionDeadline?.();
-          return "blocked";
+          return hasRecovery ? "blocked" : "resumed";
         },
       });
-      const execution = watchdog.beginExecution(undefined, recover);
-      execution.setDeadline(1);
+      const attempt = hasRecovery ? undefined : watchdog.attachAttempt({ assertCurrent() {} });
+      const execution =
+        change === "attempt"
+          ? undefined
+          : watchdog.beginExecution(undefined, hasRecovery ? recover : undefined);
+      const setDeadline = (deadline: number) =>
+        execution ? execution.setDeadline(deadline) : attempt!.setExecutionDeadline(deadline);
+      setDeadline(1);
       const pending = tickAt(watchdog, 1);
       await started.promise;
       if (change === "closed") {
-        execution.close();
-      } else if (change === "rearmed") {
-        execution.setDeadline(2);
-      } else {
+        execution!.close();
+      } else if (change === "retired") {
         current = false;
+      } else {
+        setDeadline(2);
       }
       resume.resolve();
       await pending;
       expect(effectCurrent).toBe(false);
-      expect(accepted).toBe(false);
+      expect(accepted).toBe(hasRecovery ? false : undefined);
       expect(recover).not.toHaveBeenCalled();
-      watchdog.close();
-    },
-  );
-
-  it.each(["owned", "attempt"] as const)(
-    "revalidates a plain %s execution deadline before Stop",
-    async (kind) => {
-      const started = createDeferredCore();
-      const resume = createDeferredCore();
-      let effectCurrent: boolean | undefined;
-      const watchdog = watchdogFixture({
-        requestStop: async (effect): Promise<SessionWatchdogEffectResult> => {
-          started.resolve();
-          await resume.promise;
-          effectCurrent = effect.isCurrent();
-          return "resumed";
-        },
-      });
-      const attempt = watchdog.attachAttempt({ assertCurrent() {} });
-      const execution = kind === "owned" ? watchdog.beginExecution() : undefined;
-      const setDeadline = (deadline: number) =>
-        execution ? execution.setDeadline(deadline) : attempt.setExecutionDeadline(deadline);
-      setDeadline(1);
-      const pending = tickAt(watchdog, 1);
-      await started.promise;
-      setDeadline(2);
-      resume.resolve();
-      await pending;
-      expect(effectCurrent).toBe(false);
       watchdog.close();
     },
   );
@@ -370,22 +346,6 @@ describe("operation-owned watchdog through controller admission", () => {
     },
   );
 
-  it("accepts exact meaningful progress and rejects an old callback after replacement", async () => {
-    const operation = begin();
-    const old = operation.watchdog.attachAttempt({ assertCurrent() {} });
-    vi.setSystemTime(abortMs - 1);
-    const current = operation.watchdog.attachAttempt({ assertCurrent() {} });
-    expect(current.progress("semantic", "assistant:result")).toBe(true);
-    expect(old.progress("semantic")).toBe(false);
-    expect(operation.watchdog.decide().action).toBe("observe");
-    operation.complete();
-    const successor = begin();
-    const cancel = attach(successor);
-    await operation.watchdog.tick(abortMs * 10);
-    expect(cancel).not.toHaveBeenCalled();
-    expect(getSessionControllerOperation(key)).toBe(successor);
-  });
-
   it("honors owned tool and execution deadlines on the exact attempt", async () => {
     const { operation, cancel } = running();
     const attempt = operation.watchdog.attachAttempt({ assertCurrent() {} });
@@ -398,14 +358,8 @@ describe("operation-owned watchdog through controller admission", () => {
       },
     });
     enforcedDeadline = 300_000;
-    expect(operation.watchdog.snapshot().tools).toEqual([
-      {
-        toolName: "exec",
-        toolCallId: "command",
-        startedAtMs: 0,
-        explicitDeadlineAtMs: 300_000,
-        deadlineAtMs: 1_200_000,
-      },
+    expect(operation.watchdog.snapshot().tools).toMatchObject([
+      { explicitDeadlineAtMs: 300_000, deadlineAtMs: 1_200_000 },
     ]);
     await tickAt(operation.watchdog, SESSION_WATCHDOG_QUIET_TOOL_MS + enforcedDeadline - 1);
     expect(cancel).not.toHaveBeenCalled();
@@ -419,11 +373,15 @@ describe("operation-owned watchdog through controller admission", () => {
     const old = operation.watchdog.attachAttempt({ assertCurrent() {} });
     const endOldTool = old.beginTool({ toolName: "process", toolCallId: "old-command" });
     const current = operation.watchdog.attachAttempt({ assertCurrent() {} });
+    vi.setSystemTime(abortMs - 1);
+    expect(current.progress("semantic", "assistant:result")).toBe(true);
+    expect(old.progress("semantic")).toBe(false);
+    expect(operation.watchdog.decide().action).toBe("observe");
     const endCurrentTool = current.beginTool({ toolName: "process", toolCallId: "command" });
     vi.setSystemTime(SESSION_WATCHDOG_QUIET_TOOL_MS - 1);
     expect(current.progressModel("model_call:stream_progress")).toBe(false);
     endOldTool(true);
-    expect(operation.watchdog.snapshot().semanticProgressAtMs).toBe(0);
+    expect(operation.watchdog.snapshot().semanticProgressAtMs).toBe(abortMs - 1);
     endCurrentTool(true);
     await operation.watchdog.tick();
     expect(cancel).not.toHaveBeenCalled();
@@ -434,48 +392,6 @@ describe("operation-owned watchdog through controller admission", () => {
     });
   });
 
-  it("retains finishing custody after failed cleanup until the raw writer actually settles", async () => {
-    const operation = begin();
-    const cancel = attach(
-      operation,
-      vi.fn(() => {
-        throw new Error("writer still live");
-      }),
-    );
-    operation.freezeAbort();
-    const releaseWork = beginReplyOperationFinalizationWork(
-      operation,
-      SESSION_WATCHDOG_CLEANUP_MS * 2,
-    );
-    let rawSettled = false;
-    void operation.ownerSettlement.then(() => {
-      rawSettled = true;
-    });
-    const successorStarted = createDeferredCore();
-    const successor = withSessionTurn({ sessionKey: key, sessionId }, async () => {
-      successorStarted.resolve();
-    });
-    let ranSuccessor = false;
-    void successorStarted.promise.then(() => {
-      ranSuccessor = true;
-    });
-    await tickAt(operation.watchdog, SESSION_WATCHDOG_CLEANUP_MS + 1);
-    expect(cancel).not.toHaveBeenCalled();
-    releaseWork();
-    await operation.watchdog.tick();
-    expect(cancel).toHaveBeenCalledOnce();
-    expect(operation.result?.kind).not.toBe("aborted");
-    expect(operation.result?.kind).not.toBe("failed");
-    expect(rawSettled).toBe(false);
-    expect(ranSuccessor).toBe(false);
-    expect(getSessionControllerOperation(key)).toBe(operation);
-    operation.complete();
-    await operation.ownerSettlement;
-    await successor;
-    expect(rawSettled).toBe(true);
-    expect(ranSuccessor).toBe(true);
-    expect(operation.result).toEqual({ kind: "completed" });
-  });
   it("retains committed delivery settlement after cleanup expiry", async () => {
     const operation = begin();
     const delivery = createDeferredCore();

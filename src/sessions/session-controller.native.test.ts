@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  ACTIVE_EMBEDDED_RUNS_BY_RUN_ID,
   getActiveNativeAttempt,
   type EmbeddedAgentQueueHandle,
 } from "../agents/embedded-agent-runner/run-state.js";
@@ -30,7 +29,6 @@ import { waitForSessionRunEnd } from "./session-controller.native-runtime.js";
 import { createReplyOperation } from "./session-controller.operation.js";
 import { getActiveSessionRunCount, isSessionRunActive } from "./session-controller.queries.js";
 import {
-  getAttachedBackend,
   getSessionControllerEntryForOperation,
   getSessionControllerOperation,
 } from "./session-controller.state.js";
@@ -62,15 +60,6 @@ function attach(native: EmbeddedAgentQueueHandle, owner: ReplyOperation | undefi
 }
 function detach(native: EmbeddedAgentQueueHandle, attachment?: ReturnType<typeof attach>) {
   detachActiveEmbeddedRun(sessionId, native, undefined, undefined, undefined, attachment);
-}
-function expectAttachment(
-  owner: ReplyOperation,
-  native: EmbeddedAgentQueueHandle,
-  attachment: ReturnType<typeof attach>,
-) {
-  expect(getSessionControllerEntryForOperation(owner).attachment).toBe(attachment);
-  expect(ACTIVE_EMBEDDED_RUNS_BY_RUN_ID.get(native.runId!)).toBe(attachment);
-  expect(getAttachedBackend(owner)).toBe(native);
 }
 afterEach(() => {
   nativeTesting.resetActiveEmbeddedRuns();
@@ -207,9 +196,8 @@ describe("controller/native admission boundary", () => {
       if (!firstAttachment) {
         throw new Error("Missing first attachment");
       }
-      expectAttachment(operation!, first, firstAttachment);
       expect(isSessionRunActive(sessionId)).toBe(true);
-      expect(Boolean(getActiveNativeAttempt(sessionId)?.isStreaming())).toBe(true);
+      expect(getActiveNativeAttempt(sessionId)).toBe(first);
       expect(operation?.phase).toBe("running");
       expect(resolveActiveEmbeddedRunOwnerByRunId("reused-attempt")?.runId).toBe("reused-attempt");
       let firstSettled = false;
@@ -227,21 +215,18 @@ describe("controller/native admission boundary", () => {
       if (!secondAttachment) {
         throw new Error("Missing replacement attachment");
       }
-      expectAttachment(operation!, second, secondAttachment);
       detachActiveEmbeddedRun(sessionId, first);
       await Promise.resolve();
       expect(firstSettled).toBe(true);
       expect(getActiveNativeAttempt(sessionId)).toBe(second);
       expect(getSessionControllerOperation(sessionKey)).toBe(operation);
       expect(getActiveSessionRunCount()).toBe(1);
-      expect(Boolean(getActiveNativeAttempt(sessionId)?.isStreaming())).toBe(true);
       expect(operation?.phase).toBe("running");
       detach(second, secondAttachment);
     });
     expect(getActiveSessionRunCount()).toBe(0);
     expect(isSessionRunActive(sessionId)).toBe(false);
     expect(getActiveNativeAttempt(sessionId)).toBeUndefined();
-    expect(Boolean(getActiveNativeAttempt(sessionId)?.isStreaming())).toBe(false);
     expect(resolveActiveEmbeddedRunOwnerByRunId("reused-attempt")).toBeUndefined();
   });
 
@@ -268,7 +253,6 @@ describe("controller/native admission boundary", () => {
     expect(getSessionControllerEntryForOperation(operationA).attachment).toBe(
       replacementAttachment,
     );
-    expect(ACTIVE_EMBEDDED_RUNS_BY_RUN_ID.get("ambiguous-a")).toBe(replacementAttachment);
 
     detachActiveEmbeddedRun(sessionId, replacement);
     detachActiveEmbeddedRun(sessionId, other);

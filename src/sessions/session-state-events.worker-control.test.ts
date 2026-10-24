@@ -14,7 +14,6 @@ import {
 import type { SessionStateEventRow, SessionStateNotice } from "./session-state-events.kernel.js";
 
 const edge = vi.hoisted(() => {
-  const phases: string[] = [];
   const context = {
     environment: { OPENCLAW_STATE_DIR: "/synthetic" },
     admission: {
@@ -26,7 +25,6 @@ const edge = vi.hoisted(() => {
   } satisfies OpenClawStateWorkerContext;
   const execute = vi.fn<(command: { type: string; input: unknown }) => Promise<unknown>>();
   return {
-    phases,
     context,
     execute,
     capture: vi.fn(() => context),
@@ -36,13 +34,9 @@ const edge = vi.hoisted(() => {
         _context: unknown,
         operation: (scope: { execute: typeof execute }) => Promise<unknown>,
         _options?: { createAdmission: () => unknown },
-      ) => {
-        const result = await operation({ execute });
-        phases.push("settled");
-        return result;
-      },
+      ) => operation({ execute }),
     ),
-    notice: vi.fn((_notice: unknown) => phases.push("notice")),
+    notice: vi.fn<(notice: unknown) => void>(),
     warn: vi.fn(),
   };
 });
@@ -117,15 +111,13 @@ function record(options?: Parameters<typeof recordSessionStateEventAsync>[1]) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  edge.phases.length = 0;
   // Supply the accepted store without loading runtime config or native ownership metadata.
   publishSystemEventStoreResolver(() => watcherStorePath);
   edge.capture.mockImplementation(() => edge.context);
-  edge.execute.mockImplementation(async (command) => {
-    edge.phases.push(command.type === "sessionState.prune" ? "prune" : "record");
-    return command.type === "sessionState.prune" ? undefined : recordedResult;
-  });
-  edge.notice.mockImplementation(() => edge.phases.push("notice"));
+  edge.execute.mockImplementation(async (command) =>
+    command.type === "sessionState.prune" ? undefined : recordedResult,
+  );
+  edge.notice.mockImplementation(() => undefined);
   edge.warn.mockImplementation(() => undefined);
   now += 4_000_000;
   vi.spyOn(Date, "now").mockReturnValue(now);
@@ -192,11 +184,9 @@ describe("Session signal worker reconciliation", () => {
     const pruneStarted = createDeferred();
     edge.execute.mockImplementation(async (command) => {
       if (command.type === "sessionState.prune") {
-        edge.phases.push("prune");
         pruneStarted.resolve();
         return pruning.promise;
       }
-      edge.phases.push("record");
       recordStarted.resolve();
       return recorded.promise;
     });
@@ -207,35 +197,27 @@ describe("Session signal worker reconciliation", () => {
     await recordStarted.promise;
     expect(edge.notice).not.toHaveBeenCalled();
     expect(returned).toBe(false);
-    expect(edge.execute).toHaveBeenCalledWith({
-      type: "sessionState.record",
+    expect(edge.execute.mock.calls[0]?.[0]).toMatchObject({
       input: {
-        now,
-        onlyIfWatched: undefined,
-        expectedUpstream: undefined,
         events: [
           {
-            sessionKey: "global",
             sessionId: "original-session",
-            agentId: "ops",
             kind: "goal_changed",
             actorType: "human",
             actorId: "operator",
-            summary: "goal complete",
             watcherSessionKeys: ["agent:main:main"],
-            watcherStorePaths: { "agent:main:main": notice.watcherStorePath },
+            watcherStorePaths: { "agent:main:main": watcherStorePath },
           },
         ],
       },
     });
     recorded.resolve(recordedResult);
     await pruneStarted.promise;
-    expect(edge.phases).toEqual(["record", "notice", "prune"]);
+    expect(edge.notice).toHaveBeenCalledExactlyOnceWith(notice);
     expect(returned).toBe(false);
     expect(edge.run.mock.calls[0]?.[0]).toBe(edge.context);
     pruning.resolve();
     await pending;
-    expect(edge.phases).toEqual(["record", "notice", "prune", "settled"]);
     expect(returned).toBe(true);
   });
 

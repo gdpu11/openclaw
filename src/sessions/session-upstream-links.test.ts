@@ -401,7 +401,7 @@ describe("session upstream links", () => {
     },
   );
 
-  it("returns each watched link once and skips ambiguous agent ownership without host SQL", async () => {
+  it("keeps watched links distinct and carries scan progress only across same-source refreshes", async () => {
     upsertLink(key, "claude");
     upsertLink("agent:main:adopted:unwatched");
     expect(await watch()).toBe(true);
@@ -422,17 +422,10 @@ describe("session upstream links", () => {
 
     await closeOpenClawStateDatabaseAsync();
     await withoutHostSql(async () => {
-      expect([...(await listWatched(database))]).toEqual([
-        [
-          "claude",
-          [
-            expect.objectContaining({
-              sessionKey: key,
-              marker: { offset: 1 },
-              upstreamRef: { source: key },
-            }),
-          ],
-        ],
+      const watched = await listWatched(database);
+      expect(watched.size).toBe(1);
+      expect(watched.get("claude")).toMatchObject([
+        { sessionKey: key, marker: { offset: 1 }, upstreamRef: { source: key } },
       ]);
     });
 
@@ -443,13 +436,30 @@ describe("session upstream links", () => {
     await withoutHostSql(async () => {
       expect(await Promise.all([settle(expected, 9), settle(expected, 10)])).toEqual([true, false]);
     });
-    expect((await listWatched(database)).get("claude")?.[0]).toEqual(
-      expect.objectContaining({
-        marker: { offset: 9 },
-        lastScannedAt: 200,
-        updatedAt: 200,
-      }),
+    expect((await listWatched(database)).get("claude")?.[0]).toMatchObject({
+      marker: { offset: 9 },
+      lastScannedAt: 200,
+      updatedAt: 200,
+    });
+    upsert({ ...expected, marker: { offset: 99 } }, database);
+    expect((await listWatched(database)).get("claude")?.[0]).toMatchObject({
+      upstreamRef: { source: key },
+      marker: { offset: 9 },
+    });
+    upsert(
+      {
+        ...expected,
+        threadId: "thread-refreshed",
+        upstreamRef: { source: "rebased" },
+        marker: { offset: 99 },
+      },
+      database,
     );
+    expect((await listWatched(database)).get("claude")?.[0]).toMatchObject({
+      threadId: "thread-refreshed",
+      upstreamRef: { source: "rebased" },
+      marker: { offset: 99 },
+    });
 
     deleteLink(key, "main", database);
     expect([...(await listWatched(database))]).toEqual([]);
@@ -473,40 +483,5 @@ describe("session upstream links", () => {
     } finally {
       hostSql.restore();
     }
-  });
-
-  it("preserves the marker on same-source refresh and rebases it on source change", async () => {
-    upsertLink(key, "claude");
-    await watch();
-    const expected = readLink();
-    if (!expected) {
-      throw new Error("Expected watched link");
-    }
-    await settle(expected, 4);
-
-    upsert({ ...expected, marker: { offset: 99 } }, database);
-    expect((await listWatched(database)).get("claude")?.[0]).toEqual(
-      expect.objectContaining({
-        upstreamRef: { source: key },
-        marker: { offset: 4 },
-      }),
-    );
-
-    upsert(
-      {
-        ...expected,
-        threadId: "thread-refreshed",
-        upstreamRef: { source: "rebased" },
-        marker: { offset: 99 },
-      },
-      database,
-    );
-    expect((await listWatched(database)).get("claude")?.[0]).toEqual(
-      expect.objectContaining({
-        threadId: "thread-refreshed",
-        upstreamRef: { source: "rebased" },
-        marker: { offset: 99 },
-      }),
-    );
   });
 });
