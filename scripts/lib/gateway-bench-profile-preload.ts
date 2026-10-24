@@ -72,15 +72,18 @@ if (isMainThread) {
   const workerAttribution = process.env.OPENCLAW_BENCH_WORKER_ATTRIBUTION === "1";
   const workerAttributionSourceHooks = new Set<string>();
   const sessionProjectionCounts = process.env.OPENCLAW_BENCH_SESSION_PROJECTION_COUNTS === "1";
+  const sessionProjectionSites = process.env.OPENCLAW_BENCH_SESSION_PROJECTION_SITES === "1";
   const sessionProjectionSource = process.env.OPENCLAW_BENCH_SESSION_PROJECTION_SOURCE;
   const historySource = process.env.OPENCLAW_BENCH_HISTORY_SOURCE;
   const retainToolContext = process.env.OPENCLAW_BENCH_RETAIN_TOOL_CONTEXT === "1";
   const toolExecutionSource = process.env.OPENCLAW_BENCH_TOOL_EXECUTION_SOURCE;
   let broadcastTimingInstalled = false;
   let sessionProjectionCountsInstalled = false;
+  let sessionProjectionSitesInstalled = false;
   if (
     broadcastTiming ||
     sessionProjectionCounts ||
+    sessionProjectionSites ||
     sessionProjectionSource ||
     workerAttribution ||
     historySource ||
@@ -88,8 +91,25 @@ if (isMainThread) {
     toolExecutionSource
   ) {
     const entry = new URL("../../src/entry.ts", import.meta.url);
-    if (!process.argv[1] || realpathSync(process.argv[1]) !== realpathSync(entry)) {
-      throw new Error("Benchmark source instrumentation requires --entry src/entry.ts");
+    const distDirectory = new URL("../../dist/", import.meta.url);
+    const entryPath = process.argv[1] && realpathSync(process.argv[1]);
+    const sourceEntry = entryPath === realpathSync(entry);
+    const distProjection =
+      !sourceEntry &&
+      entryPath !== undefined &&
+      path.dirname(entryPath) === path.resolve(fileURLToPath(distDirectory)) &&
+      ["entry.js", "index.js"].includes(path.basename(entryPath));
+    if (
+      !sourceEntry &&
+      (!distProjection ||
+        broadcastTiming ||
+        sessionProjectionSource ||
+        workerAttribution ||
+        historySource ||
+        retainToolContext ||
+        toolExecutionSource)
+    ) {
+      throw new Error("Only session projection counts/sites support a dist entry");
     }
     const projectionSources = new Map<string, string>();
     if (sessionProjectionSource) {
@@ -209,31 +229,126 @@ ${source.replace(
           };
         }
         const projectionSource = projectionSources.get(url);
-        if (sessionProjectionCounts && url === projectionOwner) {
-          let source = projectionSource ?? readFileSync(new URL(url), "utf8");
-          // Source-overlay comparisons also load the pre-sharing baseline owner.
-          const sharedDelivery = source.includes("      return projected;");
-          const returnAnchor = sharedDelivery
-            ? "      return projected;"
-            : "      return {\n        payload: wirePayload,";
-          const payload = sharedDelivery ? "projected.payload" : "wirePayload";
-          const replacements = [
+        const distProjectionOwner =
+          distProjection &&
+          url.startsWith(distDirectory.href) &&
+          /^session-event-projection-[\w-]+\.mjs$/.test(url.slice(distDirectory.href.length));
+        const projectionInstrumentation =
+          (sessionProjectionCounts || sessionProjectionSites) &&
+          (url === projectionOwner || distProjectionOwner);
+        let projectionPrefix = "";
+        let projectionSuffix = "";
+        let projectionBody: string | undefined;
+        if (projectionInstrumentation) {
+          projectionBody = projectionSource ?? readFileSync(new URL(url), "utf8");
+          if (distProjectionOwner) {
+            const region = "//#region src/gateway/session-event-projection.ts\n";
+            if (
+              loaded.format !== "module" ||
+              sessionProjectionCountsInstalled ||
+              sessionProjectionSitesInstalled ||
+              projectionBody.split(region).length !== 2
+            ) {
+              throw new Error("Built session projection module shape changed");
+            }
+            const begin = projectionBody.indexOf(region) + region.length;
+            const end = projectionBody.indexOf("//#endregion", begin);
+            if (end < begin || projectionBody.slice(begin, end).includes("//#region")) {
+              throw new Error("Built session projection region changed");
+            }
+            projectionPrefix = projectionBody.slice(0, begin);
+            projectionSuffix = projectionBody.slice(end);
+            projectionBody = projectionBody.slice(begin, end);
+            if (projectionBody.split("function prepareSessionEventProjection(").length !== 2) {
+              throw new Error("Built session projection owner changed");
+            }
+          }
+        }
+        if (sessionProjectionSites && projectionBody !== undefined) {
+          let source = projectionBody;
+          // Named, non-inlined diagnostic frames distinguish native builtins within the projector.
+          for (const [start, end, name] of [
             [
-              "    const audiences = new Map<",
-              `    const benchmarkProjectionPayloads = new Set<object>();
-    benchmarkSessionProjectionChannel.publish({ operation: event, publications: 1 });
-    const audiences = new Map<`,
+              distProjectionOwner
+                ? "const projected = "
+                : "const projected: Record<string, unknown> = ",
+              distProjectionOwner
+                ? "\n\t\t\t\tif (Object.hasOwn(projected"
+                : "\n        if (Object.hasOwn(projected",
+              "benchmarkProjectionEnvelope",
             ],
             [
-              "      if (!audience) {",
+              "const fields = ",
+              distProjectionOwner ? "\n\t\t\t\t\tfor (let index" : "\n          for (let index",
+              "benchmarkProjectionFieldIndex",
+            ],
+            [
+              "wirePayload = Object.fromEntries",
+              distProjectionOwner ? "\n\t\t\t\t\tif (refs)" : "\n          if (refs)",
+              "benchmarkProjectionWireFields",
+            ],
+          ] as const) {
+            if (source.split(start).length !== 2 || source.split(end).length !== 2) {
+              throw new Error("Session projection allocation-site anchors changed");
+            }
+            const begin = source.indexOf(start);
+            const finish = source.indexOf(end, begin);
+            const assignment = source.indexOf("=", begin) + 1;
+            if (finish <= assignment) {
+              throw new Error("Session projection allocation-site boundaries changed");
+            }
+            const expression = source.slice(assignment, finish).trim().replace(/;$/, "");
+            source = `${source.slice(0, assignment)} (function ${name}() { return ${expression}; })();${source.slice(finish)}`;
+          }
+          sessionProjectionSitesInstalled = true;
+          return {
+            ...loaded,
+            format: distProjectionOwner ? loaded.format : "module-typescript",
+            source: projectionPrefix + source + projectionSuffix,
+          };
+        }
+        if (sessionProjectionCounts && projectionBody !== undefined) {
+          let source = projectionBody;
+          const outerIndent = distProjectionOwner ? "\t\t" : "    ";
+          const recipientIndent = distProjectionOwner ? "\t\t\t" : "      ";
+          // Source-overlay comparisons also load the pre-sharing baseline owner.
+          const sharedDelivery = source.includes(`${recipientIndent}return projected;`);
+          if (distProjectionOwner && !sharedDelivery) {
+            throw new Error("Built session projection delivery shape changed");
+          }
+          const returnAnchor = sharedDelivery
+            ? `${recipientIndent}return projected;`
+            : "      return {\n        payload: wirePayload,";
+          const payload = sharedDelivery ? "projected.payload" : "wirePayload";
+          const audienceAnchor = distProjectionOwner
+            ? `${outerIndent}const audiences = /* @__PURE__ */ new Map();`
+            : "    const audiences = new Map<";
+          const replacements = [
+            [
+              audienceAnchor,
+              `    const benchmarkProjectionPayloads = new Set${distProjectionOwner ? "" : "<object>"}();
+    benchmarkSessionProjectionChannel.publish({ operation: event, publications: 1 });
+${audienceAnchor}`,
+            ],
+            [
+              `${recipientIndent}if (!audience) {`,
               `      if (!audience) {
         benchmarkSessionProjectionChannel.publish({ operation: event, audienceCacheMisses: 1 });`,
             ],
             [
-              "      if (!projected) {",
+              `${recipientIndent}if (!projected) {`,
               `      if (!projected) {
         benchmarkSessionProjectionChannel.publish({ operation: event, payloadCacheMisses: 1 });`,
             ],
+            ...(sharedDelivery
+              ? [
+                  [
+                    `${recipientIndent}if (!delivery) {`,
+                    `      if (!delivery) {
+        benchmarkSessionProjectionChannel.publish({ operation: event, deliveryPlanMisses: 1 });`,
+                  ],
+                ]
+              : []),
             [
               returnAnchor,
               `      benchmarkSessionProjectionChannel.publish({
@@ -255,9 +370,13 @@ ${returnAnchor}`,
           }
           source = `import { channel as benchmarkProjectionDiagnosticChannel } from "node:diagnostics_channel";
 const benchmarkSessionProjectionChannel = benchmarkProjectionDiagnosticChannel("openclaw.benchmark.session-projection");
-${source}`;
+${projectionPrefix}${source}${projectionSuffix}`;
           sessionProjectionCountsInstalled = true;
-          return { ...loaded, format: "module-typescript", source };
+          return {
+            ...loaded,
+            format: distProjectionOwner ? loaded.format : "module-typescript",
+            source,
+          };
         }
         if (projectionSource !== undefined && url !== owner) {
           // Preserve canonical imports and original TypeScript lines in sampled stacks.
@@ -524,6 +643,10 @@ ${source}`;
       message.action === "start"
     ) {
       reply("Session projection owner was not loaded; count attribution is unavailable");
+      return;
+    }
+    if (sessionProjectionSites && !sessionProjectionSitesInstalled && message.action === "start") {
+      reply("Session projection allocation-site owner was not loaded");
       return;
     }
     if (message.kind === "diagnostics") {

@@ -4220,8 +4220,9 @@ without installing the timer. Use separate fixtures and ports with matching
 workload flags. Collect allocation and broadcast-timing comparisons in separate
 passes so the timing observer's allocations do not enter the broadcast profile.
 
-Use a separate `--session-projection-counts --entry src/entry.ts` pass to count
-audience cache misses, payload-variant cache misses, successful recipient projections,
+Use a separate `--session-projection-counts` pass with `--entry src/entry.ts` or
+`--entry dist/entry.js` to count audience cache misses, delivery-plan misses,
+payload-variant cache misses, successful recipient projections,
 and distinct final wire payload objects per session publication. The report's
 `sessionProjectionCounts` includes both raw counts and per-publication means.
 These count projector results before socket submission, not acknowledged delivery.
@@ -4236,6 +4237,37 @@ an incomplete ancestor chain omits ancestor envelopes and cannot prove this effe
 Payload-cache misses describe the selected owner's internal construction stages and
 can change meaning across refactors; compare distinct final wire payloads across
 baseline and candidate implementations.
+
+To reproduce divergent connection histories with a few shared operators, use
+`--clients 66 --viewer-profiles 3 --viewer-roles --viewer-join-batch 6`.
+The roles are administrator, editor, and reader; role assignment reconnects the
+affected socket before measurement. Each join batch publishes a synthetic rename
+through the ordinary RPC before admitting the next batch. Fanout must agree within
+each profile; different roles can receive different private maintenance events,
+so this mode does not infer source-event counts from aggregate deliveries.
+`--fixture-plugins 40` adds synthetic startup plugins. For slow source startup,
+`--startup-timeout-ms` changes only the readiness budget (default 150000).
+
+Use `--session-consumption --sidebar-narration` in a separate diagnostic pass to
+feed each socket into the actual Control UI row decoder and session capability.
+The driver still owns the transport and exact subscriptions. Exact clients observe
+one selected row; remaining clients model a sidebar without chat, plugins, or an
+event-log consumer. Results separate synchronous roster/row effects, deferred
+effects, and unused sidebar message-body JSON bytes. A frame without an observed
+synchronous effect is **not** proven removable: baseline maintenance and private
+deferred invalidations can still matter. Any missing baseline or failed refresh
+invalidates the capture. Exact narration subscriptions retain full bodies under
+the existing protocol contract. Consumer instrumentation is excluded from allocation,
+CPU-profile, and GC-trace passes.
+
+For builtin allocation attribution, add `--session-projection-sites --allocations
+--disable-inlining` to a separate source or dist run. Strict source-region anchors
+insert named diagnostic frames around envelope construction, row-field indexing,
+and wire-field copying; unchanged imports and exports retain the real owner path.
+Inspect the raw `benchmarkProjectionEnvelope`, `benchmarkProjectionFieldIndex`,
+and `benchmarkProjectionWireFields` stacks. The older automatic source-file
+allocation buckets do not classify bundled dist owners. These no-inline captures
+are attribution evidence, never performance acceptance timing.
 
 The existing allocation diagnostics include per-kind GC pause `count`, `total`,
 `max`, `p95`, and `p99` under `allocation.diagnostics.gc`, plus event-loop sample

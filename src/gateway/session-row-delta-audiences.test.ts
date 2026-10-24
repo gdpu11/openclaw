@@ -217,6 +217,22 @@ it("shares recipient encodings only for matching authority and delivered baselin
       const stringify = JSON.stringify;
       let rowEncodings = 0;
       let envelopeEncodings = 0;
+      let rowEnumerations = 0;
+      const countRowEnumeration = (value: unknown) => {
+        if (isRecord(value) && value.key === key && value.sessionId === "same-generation") {
+          rowEnumerations++;
+        }
+      };
+      const keys = Object.keys;
+      const entries = Object.entries;
+      const keyEnumeration = vi.spyOn(Object, "keys").mockImplementation((value) => {
+        countRowEnumeration(value);
+        return keys(value);
+      });
+      const entryEnumeration = vi.spyOn(Object, "entries").mockImplementation((value) => {
+        countRowEnumeration(value);
+        return entries(value);
+      });
       const encoding = vi.spyOn(JSON, "stringify").mockImplementation((...args) => {
         const value: unknown = args[0];
         if (isRecord(value) && value.key === key && typeof value.version === "number") {
@@ -231,6 +247,8 @@ it("shares recipient encodings only for matching authority and delivered baselin
         publish(peers.map((peer) => peer.client.connId));
       } finally {
         encoding.mockRestore();
+        keyEnumeration.mockRestore();
+        entryEnumeration.mockRestore();
       }
       const decodedPayloads: unknown[] = [];
       for (const [index, peer] of peers.entries()) {
@@ -285,6 +303,8 @@ it("shares recipient encodings only for matching authority and delivered baselin
       expect(rowEncodings).toBeLessThanOrEqual(16);
       // Two wire capabilities per group, plus one legacy envelope per authority.
       expect(envelopeEncodings).toBeLessThanOrEqual(10);
+      // Delivered baselines differ; the immutable full-row field index does not.
+      expect(rowEnumerations).toBeLessThanOrEqual(2);
     } finally {
       detach();
       await connection.mentionInbox.dispose();

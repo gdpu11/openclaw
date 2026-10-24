@@ -58,6 +58,7 @@ const METRICS = [
   "pendingBytes",
   "publications",
   "audienceCacheMisses",
+  "deliveryPlanMisses",
   "payloadCacheMisses",
   "projectedRecipients",
   "wirePayloads",

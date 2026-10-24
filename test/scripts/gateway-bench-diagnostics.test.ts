@@ -156,6 +156,7 @@ it("retains sparse projection counts separately for each published event", () =>
   try {
     source.publish({ operation: "session.message", publications: 1 });
     source.publish({ operation: "session.message", audienceCacheMisses: 1 });
+    source.publish({ operation: "session.message", deliveryPlanMisses: 1 });
     source.publish({ operation: "session.message", payloadCacheMisses: 1 });
     source.publish({ operation: "session.message", projectedRecipients: 1, wirePayloads: 1 });
     source.publish({ operation: "session.message", projectedRecipients: 1, wirePayloads: 0 });
@@ -169,6 +170,7 @@ it("retains sparse projection counts separately for each published event", () =>
         metrics: {
           publications: { count: 1, total: 1 },
           audienceCacheMisses: { count: 1, total: 1 },
+          deliveryPlanMisses: { count: 1, total: 1 },
           payloadCacheMisses: { count: 1, total: 1 },
           projectedRecipients: { count: 2, total: 2 },
           wirePayloads: { count: 2, total: 1 },
