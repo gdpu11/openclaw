@@ -324,7 +324,7 @@ function DetailsProcesses(
     }
   };
   const Content = (contentProps: { retry: () => void }) => (
-    <Show when={processRows().length > 0}>
+    <Show when={processRows().length > 0 || processError()}>
       <details class="chat-details__group" data-details-group="processes" open>
         <summary class="chat-details__caption">
           <span class="chat-details__caption-title">{t("chat.sessionDetails.processes")}</span>
@@ -342,30 +342,32 @@ function DetailsProcesses(
             </button>
           </div>
         </Show>
-        <div role="list" aria-label={t("chat.sessionDetails.processes")}>
-          <For each={visibleRows()} keyed={(row) => row.instanceId}>
-            {(row) => (
-              <ChatDetailsProcessRow
-                row={row()}
-                presentation={presentation}
-                disabled={!props.presented}
-                hoverDescription
-                onOpen={props.details.onOpenProcesses ? openProcesses : undefined}
-              />
-            )}
-          </For>
-        </div>
-        <Show when={props.details.onOpenProcesses}>
-          <button
-            class="chat-details-processes__view-all"
-            type="button"
-            disabled={!props.presented}
-            onClick={() => openProcesses()}
-          >
-            {hidden() > 0
-              ? t("chat.sessionDetails.showMore", { count: String(hidden()) })
-              : t("chat.processesPanel.viewAll")}
-          </button>
+        <Show when={processRows().length > 0}>
+          <div role="list" aria-label={t("chat.sessionDetails.processes")}>
+            <For each={visibleRows()} keyed={(row) => row.instanceId}>
+              {(row) => (
+                <ChatDetailsProcessRow
+                  row={row()}
+                  presentation={presentation}
+                  disabled={!props.presented}
+                  hoverDescription
+                  onOpen={props.details.onOpenProcesses ? openProcesses : undefined}
+                />
+              )}
+            </For>
+          </div>
+          <Show when={props.details.onOpenProcesses}>
+            <button
+              class="chat-details-processes__view-all"
+              type="button"
+              disabled={!props.presented}
+              onClick={() => openProcesses()}
+            >
+              {hidden() > 0
+                ? t("chat.sessionDetails.showMore", { count: String(hidden()) })
+                : t("chat.processesPanel.viewAll")}
+            </button>
+          </Show>
         </Show>
       </details>
     </Show>

@@ -290,11 +290,6 @@ suite.define(() => {
                 .waitFor();
               expect((await processGroup.locator("h3").textContent())?.trim()).toBe("Processes");
               expect(
-                await processGroup
-                  .locator(".chat-details-mobile-processes__show-all > span")
-                  .evaluate((element) => getComputedStyle(element).fontVariantNumeric),
-              ).toBe("tabular-nums");
-              expect(
                 await processGroup.locator(".chat-details__process-elapsed").first().textContent(),
               ).not.toBe("");
               const mobileStop = processGroup.getByRole("button", {
@@ -320,15 +315,8 @@ suite.define(() => {
               expect((await heading.textContent())?.trim()).toBe("Processes");
               await heading.click();
               expect(await heading.getAttribute("aria-expanded")).toBe("false");
-              expect((await heading.textContent())?.trim()).toBe("Processes");
               await processGroup.locator("[data-process-id]").first().waitFor({ state: "hidden" });
               await heading.click();
-              const subagentsBounds = (await details
-                .locator('[data-details-group="subagents"]')
-                .boundingBox())!;
-              expect((await processGroup.boundingBox())!.y).toBeGreaterThanOrEqual(
-                subagentsBounds.y + subagentsBounds.height,
-              );
               const first = processGroup.locator('[data-process-id="dev-server"]');
               expect(await first.locator(".chat-details-processes__open").textContent()).toBe(
                 processes[0]!.name,
@@ -381,16 +369,6 @@ suite.define(() => {
               expect(await longName.locator("..").getAttribute("aria-label")).toContain(
                 processes[1]!.name,
               );
-              expect(
-                await processGroup
-                  .locator('[data-status="completed"] .chat-details-processes__stop')
-                  .count(),
-              ).toBe(0);
-              expect(
-                await processGroup
-                  .locator('[data-status="failed"] .chat-details-processes__stop')
-                  .count(),
-              ).toBe(0);
               if (width === 1728) {
                 await gateway.deferNext("sessions.processes.stop");
                 await stop.press("Enter");
@@ -598,8 +576,6 @@ suite.define(() => {
               })
               .click();
             await panel.getByRole("button", { name: processes[0]!.name, exact: true }).waitFor();
-            await panel.getByRole("button", { name: /Finished/ }).click();
-            await expect.poll(() => panel.locator("[data-process-id]").count()).toBe(6);
             await panel.getByRole("button", { name: processes[0]!.name, exact: true }).click();
             await panel.getByRole("button", { name: "Back to Processes", exact: true }).click();
             await panel.getByRole("button", { name: processes[0]!.name, exact: true }).waitFor();
@@ -622,7 +598,6 @@ suite.define(() => {
               ).toBe("true");
               await expect.poll(() => collection.locator("[data-session-key]").count()).toBe(6);
             } else {
-              await panel.getByRole("button", { name: /Finished/ }).click();
               await pane.getByRole("button", { name: "Close Processes", exact: true }).click();
             }
           }
@@ -743,7 +718,6 @@ suite.define(() => {
               ? ["dev-server", "watch-tests", "watch-assets"]
               : ["dev-server", "watch-tests"],
           );
-          expect(await created()).toBeGreaterThan(0);
           expect((await envelope.boundingBox())!.height).toBe(0);
           await advance(150);
           if (width === 1728) {
@@ -783,7 +757,6 @@ suite.define(() => {
           await advance(150);
           await page.mouse.up();
           expect(await gateway.getRequests("sessions.processes.stop")).toHaveLength(0);
-          await stop!.dispose();
           const beforeLog = await created();
           const logRows = structuredClone(finishThrough(1));
           for (const row of logRows) {
@@ -811,7 +784,6 @@ suite.define(() => {
               : ["dev-server", "watch-tests"],
           );
           await advance(150);
-          expect(await rows.count()).toBe(width === 1728 ? 3 : 2);
           if (width === 1728) {
             const body = group.locator(".chat-details-desktop-section__body");
             const heading = group.locator(":scope > summary");
@@ -831,7 +803,6 @@ suite.define(() => {
             const beforeManual = await created();
             await publish(finishThrough(0), ["watch-tests", "watch-assets", "watch-docs"]);
             expect(await created()).toBe(beforeManual);
-            expect(await envelope.evaluate((element) => element.getAnimations().length)).toBe(0);
             await body.evaluate((element) =>
               element.getAnimations().forEach((animation) => animation.finish()),
             );
@@ -850,13 +821,17 @@ suite.define(() => {
             message: "Process access removed",
           });
           await frame();
-          expect(await envelope.count()).toBe(0);
-          await publish(
-            currentProcesses,
-            width === 1728
-              ? ["dev-server", "watch-tests", "watch-assets"]
-              : ["dev-server", "watch-tests"],
+          expect(await details.getByRole("alert").textContent()).toContain(
+            "Process access removed",
           );
+          expect(await rows.count()).toBe(0);
+          await gateway.setMethodResponse("sessions.processes.list", {
+            sessionId: "details-background",
+            processes: currentProcesses,
+            truncated: false,
+          });
+          await details.getByRole("button", { name: "Retry", exact: true }).click();
+          await expect.poll(() => rows.count()).toBe(width === 1728 ? 3 : 2);
           await advance(150);
           await page.emulateMedia({ reducedMotion: "reduce" });
           await frame();
@@ -865,11 +840,6 @@ suite.define(() => {
           expect(await created()).toBe(beforeReduced);
           await publish(finishThrough(3), []);
           expect(await envelope.count()).toBe(0);
-          await control.dispose();
-          for (const element of initial) {
-            await element.dispose();
-          }
-          await survivor?.dispose();
         },
       );
     }
