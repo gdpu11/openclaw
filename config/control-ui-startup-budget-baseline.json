@@ -1,5 +1,5 @@
 {
-  "startupJsGzipBytes": 281671,
-  "reason": "Bound Cron run-history selector traversal: matched c64f3109 startup 281744 to 281671 B gzip, style CPU median down 15.25% desktop and 17.09% mobile; 7 JS and 1 CSS request unchanged.",
+  "startupJsGzipBytes": 281233,
+  "reason": "Token-to-DOM Markdown: Peter accepted chat boot +2374 B for measured streaming script CPU -8.6% and HTML parses 2129 to 178; startup 281233 B (+38 B build variance), 7 JS + 1 CSS.",
   "updatedAt": "2026-10-24"
 }
