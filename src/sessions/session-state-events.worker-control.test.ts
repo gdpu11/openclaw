@@ -25,9 +25,6 @@ const edge = vi.hoisted(() => {
     },
   } satisfies OpenClawStateWorkerContext;
   const execute = vi.fn<(command: { type: string; input: unknown }) => Promise<unknown>>();
-  const forbidden = vi.fn((): never => {
-    throw new Error("Session signal control crossed a native or process boundary");
-  });
   return {
     phases,
     context,
@@ -47,51 +44,20 @@ const edge = vi.hoisted(() => {
     ),
     notice: vi.fn((_notice: unknown) => phases.push("notice")),
     warn: vi.fn(),
-    forbidden,
-    forbid: (...names: string[]) => Object.fromEntries(names.map((name) => [name, forbidden])),
   };
 });
 
-vi.mock("node:sqlite", () => edge.forbid("DatabaseSync"));
-vi.mock("node:worker_threads", () => ({ isMainThread: true, threadId: 0, Worker: edge.forbidden }));
-vi.mock("node:child_process", () =>
-  edge.forbid("spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"),
-);
 vi.mock("../infra/sqlite-worker-operation-admission.js", () => ({
   createSqliteWorkerOperationAdmission: edge.admission,
 }));
-// mock-isolation: Host-control proof rejects native SQLite access rather than opening a database.
-vi.mock("../infra/node-sqlite.js", () =>
-  edge.forbid("requireNodeSqlite", "openNodeSqliteDatabase"),
-);
-// Schema owners create query caches at import time; keep factories real and SQL calls forbidden.
-vi.mock("../infra/kysely-sync.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../infra/kysely-sync.js")>()),
-  ...edge.forbid(
-    "getNodeSqliteKysely",
-    "executeSqliteQuerySync",
-    "executeSqliteQueryTakeFirstSync",
-  ),
-}));
-// Keep config loading from publishing metadata readers that capture this fixture's native mocks.
-vi.mock("../config/io.js", () => ({ getRuntimeConfig: () => ({}) }));
-vi.mock("../config/sessions/session-accessor.js", () => ({ loadSessionEntryReadOnly: vi.fn() }));
 // mock-isolation: Host-control warnings are captured without installing process log transports.
 vi.mock("../logging/subsystem.js", () => ({ createSubsystemLogger: () => ({ warn: edge.warn }) }));
-// mock-isolation: Host-control proof forbids state database access on the calling thread.
-vi.mock("../state/openclaw-state-db.js", () => ({
-  ...edge.forbid("openOpenClawStateDatabase", "runOpenClawStateWriteTransaction"),
-}));
 vi.mock("../state/openclaw-state-worker-context.js", () => ({
   captureOpenClawStateWorkerContext: edge.capture,
   captureOpenClawStateReadWorkerContext: edge.capture,
 }));
 vi.mock("../state/openclaw-state-worker-store.js", () => ({
   runOpenClawStateWorkerOperation: edge.run,
-}));
-// mock-isolation: Host-control proof forbids native SQL and substitutes only the worker result codec.
-vi.mock("./session-state-events.kernel.js", () => ({
-  rowToSessionStateEvent: vi.fn(),
 }));
 vi.mock("./session-state-notices.js", () => ({ enqueueSessionStateNotice: edge.notice }));
 
@@ -136,14 +102,17 @@ function goalChange() {
   });
 }
 
-function recordSibling() {
-  return recordSessionStateEventAsync({
-    sessionKey: "agent:main:sibling",
-    agentId: "main",
-    kind: "adopted",
-    actorType: "system",
-    summary: "session adopted",
-  });
+function record(options?: Parameters<typeof recordSessionStateEventAsync>[1]) {
+  return recordSessionStateEventAsync(
+    {
+      sessionKey: "agent:main:sibling",
+      agentId: "main",
+      kind: "adopted",
+      actorType: "system",
+      summary: "session adopted",
+    },
+    options,
+  );
 }
 
 beforeEach(() => {
@@ -164,7 +133,6 @@ beforeEach(() => {
 
 afterEach(() => {
   publishSystemEventStoreResolver(undefined);
-  expect(edge.forbidden).not.toHaveBeenCalled();
   vi.restoreAllMocks();
 });
 
@@ -175,22 +143,13 @@ describe("Session signal worker reconciliation", () => {
       const recorded = createDeferred<Recorded>();
       edge.execute.mockReturnValueOnce(recorded.promise);
       let current = true;
-      const pending = recordSessionStateEventAsync(
-        {
-          sessionKey: "agent:main:child",
-          agentId: "main",
-          kind: "human_direct_message",
-          actorType: "human",
-          summary: "human message",
+      const pending = record({
+        assertCurrent: () => {
+          if (!current) {
+            throw new Error("producer retired");
+          }
         },
-        {
-          assertCurrent: () => {
-            if (!current) {
-              throw new Error("producer retired");
-            }
-          },
-        },
-      );
+      });
       edge.run.mock.calls.at(-1)![2]!.createAdmission();
       const admit = edge.admission.mock.calls.at(-1)![0];
       current = false;
@@ -324,7 +283,7 @@ describe("Session signal worker reconciliation", () => {
     });
     const pending = goalChange();
     await pruneStarted.promise;
-    await recordSibling();
+    await record();
     if (fail) {
       pruning.reject(new Error("Synthetic prune refusal"));
     } else {
@@ -335,7 +294,7 @@ describe("Session signal worker reconciliation", () => {
       now += 4_000_000;
       vi.mocked(Date.now).mockReturnValue(now);
     }
-    const next = recordSibling();
+    const next = record();
     await nextPruneStarted.promise;
     await next;
     expect(

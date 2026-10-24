@@ -103,47 +103,21 @@ describe("empty-tree preparation", () => {
 
 describe("branch base resolution", () => {
   it.each([
-    {
-      name: "symbolic origin/HEAD before local and remote defaults",
-      symbolicDefault: "origin/trunk",
-      refs: ["origin/trunk", "main", "master", "origin/main", "origin/master"],
-      expected: { base: "origin/trunk-base", baseRef: "trunk" },
-    },
-    {
-      name: "local main before local master and remote defaults",
-      symbolicDefault: null,
-      refs: ["main", "master", "origin/main", "origin/master"],
-      expected: { base: "main-base", baseRef: "main" },
-    },
-    {
-      name: "local master before remote defaults",
-      symbolicDefault: null,
-      refs: ["master", "origin/main", "origin/master"],
-      expected: { base: "master-base", baseRef: "master" },
-    },
-    {
-      name: "remote main before remote master",
-      symbolicDefault: null,
-      refs: ["origin/main", "origin/master"],
-      expected: { base: "origin/main-base", baseRef: "origin/main" },
-    },
-  ])("prefers $name", async ({ symbolicDefault, refs, expected }) => {
-    const mergeBases = new Map(refs.map((ref) => [ref, `${ref}-base\n`]));
+    ["origin/trunk", ["origin/trunk", "main", "master", "origin/main", "origin/master"], "trunk"],
+    [null, ["main", "master", "origin/main", "origin/master"], "main"],
+    [null, ["master", "origin/main", "origin/master"], "master"],
+    [null, ["origin/main", "origin/master"], "origin/main"],
+  ] as const)("prefers %s / %j", async (symbolicDefault, refs, baseRef) => {
     const gitOut = async (_root: string, args: string[]) => {
       if (args[0] === "symbolic-ref") {
         return symbolicDefault;
       }
-      const ref = (args[0] === "rev-parse" ? args.at(-1) : args[1])?.replace(/-sha$/, "");
-      const mergeBase = ref ? mergeBases.get(ref) : undefined;
-      if (!mergeBase) {
-        return null;
-      }
-      return args[0] === "merge-base" ? mergeBase : `${ref}-sha\n`;
+      return refs.some((ref) => ref === args[1]) ? `${args[1]}-base\n` : null;
     };
 
     await expect(
       resolveSessionDiffBase({ branch: "feature", gitOut, head: "captured-head", root: "/repo" }),
-    ).resolves.toEqual(expected);
+    ).resolves.toEqual({ base: `${refs[0]}-base`, baseRef });
   });
 
   it.each([undefined, "main", "master"])(
@@ -152,9 +126,6 @@ describe("branch base resolution", () => {
       const gitOut = async (_root: string, args: string[]) => {
         if (args[0] === "symbolic-ref") {
           return null;
-        }
-        if (args[0] === "rev-parse" && args.at(-1)?.startsWith("origin/")) {
-          return "remote-sha\n";
         }
         if (args[0] === "merge-base" && args[1]?.startsWith("origin/")) {
           return "remote-base\n";
