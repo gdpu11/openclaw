@@ -139,7 +139,14 @@ async function observe(session: ReturnType<typeof createSession>) {
   assert.equal(result.changes, null);
   session.observer.onModelUsage({ input: 1000, cacheRead: 9000 });
 }
-await observe(createSession(-1, 16));
+async function warm() {
+  // Use the measured history size and all roles before collecting the heap baseline.
+  const session = createSession(sessionCount, messageCount);
+  for (let round = 0; round < 100; round++) {
+    await observe(session);
+  }
+}
+await warm();
 clearPromptCacheObservations();
 await collect();
 const sessions = Array.from({ length: sessionCount }, (_, index) =>
