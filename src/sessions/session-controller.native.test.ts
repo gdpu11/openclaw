@@ -50,6 +50,28 @@ function handle(runId: string): EmbeddedAgentQueueHandle & ReplyBackendHandle {
 
 const sessionKey = "agent:main:controller-native";
 const sessionId = "controller-native-session";
+const directAdmission = { sessionKey, sessionId };
+function makeOperation(
+  target?: Parameters<typeof createReplyOperation>[0]["target"],
+  id = sessionId,
+) {
+  return createReplyOperation({ sessionKey, sessionId: id, resetTriggered: false, target });
+}
+function attach(native: EmbeddedAgentQueueHandle, owner: ReplyOperation | undefined) {
+  return attachActiveEmbeddedRun(sessionId, native, sessionKey, undefined, "main", owner);
+}
+function detach(native: EmbeddedAgentQueueHandle, attachment?: ReturnType<typeof attach>) {
+  detachActiveEmbeddedRun(sessionId, native, undefined, undefined, undefined, attachment);
+}
+function expectAttachment(
+  owner: ReplyOperation,
+  native: EmbeddedAgentQueueHandle,
+  attachment: ReturnType<typeof attach>,
+) {
+  expect(getSessionControllerEntryForOperation(owner).attachment).toBe(attachment);
+  expect(ACTIVE_EMBEDDED_RUNS_BY_RUN_ID.get(native.runId!)).toBe(attachment);
+  expect(getAttachedBackend(owner)).toBe(native);
+}
 afterEach(() => {
   nativeTesting.resetActiveEmbeddedRuns();
   controllerTesting.resetSessionControllerForTest();
@@ -61,19 +83,12 @@ describe("controller/native admission boundary", () => {
     async (supportsTranscriptCommitWait) => {
       let released: NonNullable<AgentHarnessAttemptParams["replyOperation"]> | undefined;
       const native = { ...handle("direct-observation"), supportsTranscriptCommitWait };
-      await withSessionTurn({ sessionKey, sessionId }, async (operation) => {
+      await withSessionTurn(directAdmission, async (operation) => {
         if (!operation) {
           throw new Error("Expected an admitted native operation");
         }
         released = operation;
-        const attachment = attachActiveEmbeddedRun(
-          sessionId,
-          native,
-          sessionKey,
-          undefined,
-          "main",
-          operation,
-        );
+        const attachment = attach(native, operation);
         try {
           expect(released.turnKind).toBe("visible");
           expect(released.phase).toBe("running");
@@ -97,11 +112,13 @@ describe("controller/native admission boundary", () => {
           );
           expect(native.queueMessage).toHaveBeenCalledTimes(supportsTranscriptCommitWait ? 2 : 1);
         } finally {
-          detachActiveEmbeddedRun(sessionId, native, undefined, undefined, undefined, attachment);
+          detach(native, attachment);
         }
       });
-      expect(released?.turnKind).toBe("visible");
-      expect(released?.phase).toBe("completed");
+      expect(released).toMatchObject({
+        turnKind: "visible",
+        phase: "completed",
+      });
       expect(released?.result).toEqual({ kind: "completed" });
     },
   );
@@ -135,20 +152,20 @@ describe("controller/native admission boundary", () => {
     const secondStarted = vi.fn();
     const native = handle("first-native");
     let firstOperation: ReplyOperation | undefined;
-    const first = withSessionTurn({ sessionKey, sessionId }, async (operation) => {
+    const first = withSessionTurn(directAdmission, async (operation) => {
       firstOperation = operation;
       expect(getSessionControllerOperation(sessionKey)).toBe(operation);
       expect(isSessionRunActive(sessionId)).toBe(true);
       expect(operation?.phase).toBe("queued");
       expect(getActiveNativeAttempt(sessionId)).toBeUndefined();
-      attachActiveEmbeddedRun(sessionId, native, sessionKey, undefined, "main", operation);
+      attach(native, operation);
       expect(operation?.phase).toBe("running");
       started.resolve();
       await release.promise;
       detachActiveEmbeddedRun(sessionId, native);
     });
     await started.promise;
-    const second = withSessionTurn({ sessionKey, sessionId }, async (operation) => {
+    const second = withSessionTurn(directAdmission, async (operation) => {
       secondStarted();
       expect(operation).not.toBe(firstOperation);
       expect(getSessionControllerOperation(sessionKey)).toBe(operation);
@@ -167,16 +184,14 @@ describe("controller/native admission boundary", () => {
     expect(() => attachActiveEmbeddedRun(sessionId, first, sessionKey)).toThrow(
       SessionControllerAdmissionRequiredError,
     );
-    const old = createReplyOperation({ sessionKey, sessionId, resetTriggered: false });
-    attachActiveEmbeddedRun(sessionId, first, sessionKey, undefined, "main", old);
+    const old = makeOperation();
+    attach(first, old);
     detachActiveEmbeddedRun(sessionId, first);
     old.complete();
-    const current = createReplyOperation({ sessionKey, sessionId, resetTriggered: false });
+    const current = makeOperation();
     const replacement = handle("reused-native-id");
-    attachActiveEmbeddedRun(sessionId, replacement, sessionKey, undefined, "main", current);
-    expect(() =>
-      attachActiveEmbeddedRun(sessionId, first, sessionKey, undefined, "main", old),
-    ).toThrow(/admission/);
+    attach(replacement, current);
+    expect(() => attach(first, old)).toThrow(/admission/);
     detachActiveEmbeddedRun(sessionId, first);
     expect(getActiveNativeAttempt(sessionId)).toBe(replacement);
     expect(getSessionControllerOperation(sessionKey)).toBe(current);
@@ -185,23 +200,14 @@ describe("controller/native admission boundary", () => {
   });
 
   it("borrows one operation for retries and cannot let an old native detach retire its replacement", async () => {
-    await withSessionTurn({ sessionKey, sessionId }, async (operation) => {
+    await withSessionTurn(directAdmission, async (operation) => {
       const first = handle("reused-attempt");
       const second = handle("reused-attempt");
-      const firstAttachment = attachActiveEmbeddedRun(
-        sessionId,
-        first,
-        sessionKey,
-        undefined,
-        "main",
-        operation,
-      );
+      const firstAttachment = attach(first, operation);
       if (!firstAttachment) {
         throw new Error("Missing first attachment");
       }
-      expect(getSessionControllerEntryForOperation(operation!).attachment).toBe(firstAttachment);
-      expect(ACTIVE_EMBEDDED_RUNS_BY_RUN_ID.get("reused-attempt")).toBe(firstAttachment);
-      expect(getAttachedBackend(operation!)).toBe(first);
+      expectAttachment(operation!, first, firstAttachment);
       expect(isSessionRunActive(sessionId)).toBe(true);
       expect(Boolean(getActiveNativeAttempt(sessionId)?.isStreaming())).toBe(true);
       expect(operation?.phase).toBe("running");
@@ -215,22 +221,13 @@ describe("controller/native admission boundary", () => {
         { sessionKey, sessionId, replyOperation: operation },
         async (borrowed) => {
           expect(borrowed).toBe(operation);
-          secondAttachment = attachActiveEmbeddedRun(
-            sessionId,
-            second,
-            sessionKey,
-            undefined,
-            "main",
-            borrowed,
-          );
+          secondAttachment = attach(second, borrowed);
         },
       );
       if (!secondAttachment) {
         throw new Error("Missing replacement attachment");
       }
-      expect(getSessionControllerEntryForOperation(operation!).attachment).toBe(secondAttachment);
-      expect(ACTIVE_EMBEDDED_RUNS_BY_RUN_ID.get("reused-attempt")).toBe(secondAttachment);
-      expect(getAttachedBackend(operation!)).toBe(second);
+      expectAttachment(operation!, second, secondAttachment);
       detachActiveEmbeddedRun(sessionId, first);
       await Promise.resolve();
       expect(firstSettled).toBe(true);
@@ -239,7 +236,7 @@ describe("controller/native admission boundary", () => {
       expect(getActiveSessionRunCount()).toBe(1);
       expect(Boolean(getActiveNativeAttempt(sessionId)?.isStreaming())).toBe(true);
       expect(operation?.phase).toBe("running");
-      detachActiveEmbeddedRun(sessionId, second, undefined, undefined, undefined, secondAttachment);
+      detach(second, secondAttachment);
     });
     expect(getActiveSessionRunCount()).toBe(0);
     expect(isSessionRunActive(sessionId)).toBe(false);
@@ -249,49 +246,16 @@ describe("controller/native admission boundary", () => {
   });
 
   it("replaces the exact operation attachment when the session id is ambiguous", () => {
-    const targetA = captureSessionTarget({
-      storeScope: "/tmp/controller-native-a.sqlite",
-      sessionKey,
-      incarnation: sessionId,
-    });
-    const targetB = captureSessionTarget({
-      storeScope: "/tmp/controller-native-b.sqlite",
-      sessionKey,
-      incarnation: sessionId,
-    });
-    const operationA = createReplyOperation({
-      sessionKey,
-      sessionId,
-      target: targetA,
-      resetTriggered: false,
-    });
-    const operationB = createReplyOperation({
-      sessionKey,
-      sessionId,
-      target: targetB,
-      resetTriggered: false,
-    });
+    const physical = (storeScope: string) =>
+      captureSessionTarget({ storeScope, sessionKey, incarnation: sessionId });
+    const operationA = makeOperation(physical("/tmp/controller-native-a.sqlite"));
+    const operationB = makeOperation(physical("/tmp/controller-native-b.sqlite"));
     const first = handle("ambiguous-a");
     const other = handle("ambiguous-b");
     const replacement = handle("ambiguous-a");
-    const firstAttachment = attachActiveEmbeddedRun(
-      sessionId,
-      first,
-      sessionKey,
-      undefined,
-      "main",
-      operationA,
-    );
-    attachActiveEmbeddedRun(sessionId, other, sessionKey, undefined, "main", operationB);
-
-    const replacementAttachment = attachActiveEmbeddedRun(
-      sessionId,
-      replacement,
-      sessionKey,
-      undefined,
-      "main",
-      operationA,
-    );
+    const firstAttachment = attach(first, operationA);
+    attach(other, operationB);
+    const replacementAttachment = attach(replacement, operationA);
 
     expect(replacementAttachment).not.toBe(firstAttachment);
     expect(getSessionControllerEntryForOperation(operationA).attachment).toBe(
@@ -313,18 +277,14 @@ describe("controller/native admission boundary", () => {
   });
 
   it("does not include a synchronously admitted replacement in an already captured restart sweep", () => {
-    const first = createReplyOperation({ sessionKey, sessionId, resetTriggered: false });
+    const first = makeOperation();
     let successor: ReplyOperation | undefined;
     const replacement = handle("replacement-native");
     first.attachBackend({
       kind: "embedded",
       cancel: () => {
         first.complete();
-        successor = createReplyOperation({
-          sessionKey,
-          sessionId: "replacement-session",
-          resetTriggered: false,
-        });
+        successor = makeOperation(undefined, "replacement-session");
         attachActiveEmbeddedRun(
           "replacement-session",
           replacement,

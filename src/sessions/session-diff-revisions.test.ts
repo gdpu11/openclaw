@@ -23,6 +23,56 @@ vi.mock("../agents/worktrees/git.js", async (importOriginal) => ({
 }));
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
+const execute = promisify(execFile);
+const gitIn = async (cwd: string, ...args: string[]) =>
+  (
+    await execute("git", [
+      "-C",
+      cwd,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "-c",
+      "commit.gpgsign=false",
+      ...args,
+    ])
+  ).stdout;
+
+async function withCheckout(
+  prefix: string,
+  run: (fixture: {
+    root: string;
+    git: (...args: string[]) => Promise<string>;
+    write: (file: string, content: string) => Promise<void>;
+    timing: DiffReadTiming;
+    read: () => ReturnType<typeof loadCheckoutDiff>;
+  }) => Promise<void>,
+) {
+  vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
+  vi.stubEnv("GIT_CONFIG_GLOBAL", os.devNull);
+  await drainGlobalSingletonLifecycleState("restart");
+  const root = await fs.realpath(tempDirs.make(prefix));
+  const timing: DiffReadTiming = { durations: {} };
+  const stopDiagnostics = onTrustedInternalDiagnosticEvent(() => undefined, {
+    includeTrusted: ["diagnostic.phase.completed"],
+  });
+  try {
+    await run({
+      root,
+      timing,
+      git: (...args) => gitIn(root, ...args),
+      write: (file, content) => fs.writeFile(path.join(root, file), content),
+      read: () => loadCheckoutDiff({ cwd: root, sessionKey: "fixture" }, timing),
+    });
+  } finally {
+    stopDiagnostics();
+    await drainGlobalSingletonLifecycleState("restart");
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  }
+}
+
 function gitResult(stdout: string, code = 0): GitResult {
   return {
     stdout,
@@ -136,21 +186,7 @@ describe("branch base resolution", () => {
 describe("captured session history", () => {
   it("does not admit commits added after the checkout revision was captured", async () => {
     const root = tempDirs.make("openclaw-captured-history-");
-    const execute = promisify(execFile);
-    const git = async (...args: string[]) =>
-      (
-        await execute("git", [
-          "-C",
-          root,
-          "-c",
-          "user.name=Test",
-          "-c",
-          "user.email=test@example.invalid",
-          "-c",
-          "commit.gpgsign=false",
-          ...args,
-        ])
-      ).stdout;
+    const git = (...args: string[]) => gitIn(root, ...args);
     await git("init", "-b", "main");
     await fs.writeFile(path.join(root, "file.txt"), "base\n");
     await git("add", "file.txt");
@@ -176,21 +212,13 @@ describe("captured session history", () => {
 
 it.skipIf(process.platform === "win32")(
   "briefly reuses missing checkout results and observes a recreated checkout after expiry",
-  async () => {
-    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
-    vi.stubEnv("GIT_CONFIG_GLOBAL", os.devNull);
-    await drainGlobalSingletonLifecycleState("restart");
-    const parent = await fs.realpath(tempDirs.make("openclaw-missing-diff-"));
-    const cwd = path.join(parent, "checkout");
-    const timing: DiffReadTiming = { durations: {} };
-    const stopDiagnostics = onTrustedInternalDiagnosticEvent(() => undefined, {
-      includeTrusted: ["diagnostic.phase.completed"],
-    });
-    const read = () => {
-      timing.durations = {};
-      return loadCheckoutDiff({ cwd, sessionKey: "fixture" }, timing);
-    };
-    try {
+  () =>
+    withCheckout("openclaw-missing-diff-", async ({ root, timing }) => {
+      const cwd = path.join(root, "checkout");
+      const read = () => {
+        timing.durations = {};
+        return loadCheckoutDiff({ cwd, sessionKey: "fixture" }, timing);
+      };
       expect(await read()).toMatchObject({ files: [], unavailableReason: "not_git" });
       expect(timing.missReason).toBe("no-revision-missing");
       expect(await read()).toMatchObject({ files: [], unavailableReason: "not_git" });
@@ -206,41 +234,16 @@ it.skipIf(process.platform === "win32")(
       expect(recreated.files).toEqual([
         expect.objectContaining({ path: "created.txt", additions: 1, status: "added" }),
       ]);
-    } finally {
-      stopDiagnostics();
-      await drainGlobalSingletonLifecycleState("restart");
-      vi.restoreAllMocks();
-      vi.unstubAllEnvs();
-    }
-  },
+    }),
 );
 
 it.skipIf(process.platform === "win32")(
   "reuses diffs from nested and aliased linked worktrees while an index writer holds its lock",
-  async () => {
-    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
-    vi.stubEnv("GIT_CONFIG_GLOBAL", os.devNull);
-    await drainGlobalSingletonLifecycleState("restart");
-    const root = await fs.realpath(tempDirs.make("openclaw-linked-diff-"));
-    const origin = path.join(root, "origin");
-    const checkout = path.join(root, "checkout");
-    const execute = promisify(execFile);
-    const git = (...args: string[]) =>
-      execute("git", [
-        "-C",
-        origin,
-        "-c",
-        "user.name=Test",
-        "-c",
-        "user.email=test@example.invalid",
-        "-c",
-        "commit.gpgsign=false",
-        ...args,
-      ]);
-    const stopDiagnostics = onTrustedInternalDiagnosticEvent(() => undefined, {
-      includeTrusted: ["diagnostic.phase.completed"],
-    });
-    try {
+  () =>
+    withCheckout("openclaw-linked-diff-", async ({ root }) => {
+      const origin = path.join(root, "origin");
+      const checkout = path.join(root, "checkout");
+      const git = (...args: string[]) => gitIn(origin, ...args);
       await fs.mkdir(origin);
       await git("init", "-b", "main");
       await fs.writeFile(path.join(origin, "tracked.txt"), "before\n");
@@ -289,40 +292,15 @@ it.skipIf(process.platform === "win32")(
         )?.patch,
       ).toContain("+later");
       expect(timing.missReason).toBe("no-revision-config");
-    } finally {
-      stopDiagnostics();
-      await drainGlobalSingletonLifecycleState("restart");
-      vi.restoreAllMocks();
-      vi.unstubAllEnvs();
-    }
-  },
+    }),
 );
 
 it.skipIf(process.platform === "win32")(
   "caches opaque nested repositories and refreshes gitlink dirtiness",
-  async () => {
-    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
-    vi.stubEnv("GIT_CONFIG_GLOBAL", os.devNull);
-    await drainGlobalSingletonLifecycleState("restart");
-    const root = await fs.realpath(tempDirs.make("openclaw-nested-repo-diff-"));
-    const nested = path.join(root, "clone");
-    const execute = promisify(execFile);
-    const git = (cwd: string, ...args: string[]) =>
-      execute("git", [
-        "-C",
-        cwd,
-        "-c",
-        "user.name=Test",
-        "-c",
-        "user.email=test@example.invalid",
-        "-c",
-        "commit.gpgsign=false",
-        ...args,
-      ]);
-    const stopDiagnostics = onTrustedInternalDiagnosticEvent(() => undefined, {
-      includeTrusted: ["diagnostic.phase.completed"],
-    });
-    try {
+  () =>
+    withCheckout("openclaw-nested-repo-diff-", async ({ root }) => {
+      const nested = path.join(root, "clone");
+      const git = gitIn;
       await git(root, "init", "-b", "main");
       await git(root, "commit", "--allow-empty", "-m", "base");
       await fs.mkdir(nested);
@@ -356,8 +334,8 @@ it.skipIf(process.platform === "win32")(
       await git(nested, "commit", "-am", "nested changes");
       await git(root, "add", "clone");
       await git(root, "commit", "-m", "gitlink");
-      const baseCommit = (await git(root, "rev-parse", "HEAD")).stdout.trim();
-      const nestedBase = (await git(nested, "rev-parse", "HEAD")).stdout.trim();
+      const baseCommit = (await git(root, "rev-parse", "HEAD")).trim();
+      const nestedBase = (await git(nested, "rev-parse", "HEAD")).trim();
       const timing: DiffReadTiming = { durations: {} };
       const read = () => loadCheckoutDiff({ cwd: root, sessionKey: "fixture" }, timing);
       expect((await read()).files).toEqual([]);
@@ -377,7 +355,7 @@ it.skipIf(process.platform === "win32")(
       expect((await read()).files).toEqual([]);
       await fs.appendFile(nestedFile, "third commit\n");
       await git(nested, "commit", "-am", "third gitlink head");
-      const nestedThird = (await git(nested, "rev-parse", "HEAD")).stdout.trim();
+      const nestedThird = (await git(nested, "rev-parse", "HEAD")).trim();
       await git(nested, "checkout", "--detach", nestedBase);
       const readFromBase = () =>
         loadCheckoutDiff({ cwd: root, sessionKey: "fixture", baseCommit }, timing);
@@ -391,42 +369,13 @@ it.skipIf(process.platform === "win32")(
       expect((await readFromBase()).files).toEqual([
         { path: "clone", status: "modified", additions: 1, deletions: 1, truncated: true },
       ]);
-    } finally {
-      stopDiagnostics();
-      await drainGlobalSingletonLifecycleState("restart");
-      vi.restoreAllMocks();
-      vi.unstubAllEnvs();
-    }
-  },
+    }),
 );
 
 it.skipIf(process.platform === "win32")(
   "reuses committed diffs across ignored and index churn but refreshes patch eligibility and attributes",
-  async () => {
-    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
-    vi.stubEnv("GIT_CONFIG_GLOBAL", os.devNull);
-    await drainGlobalSingletonLifecycleState("restart");
-    const root = await fs.realpath(tempDirs.make("openclaw-diff-cache-"));
-    const execute = promisify(execFile);
-    const git = (...args: string[]) =>
-      execute("git", [
-        "-C",
-        root,
-        "-c",
-        "user.name=Test",
-        "-c",
-        "user.email=test@example.invalid",
-        "-c",
-        "commit.gpgsign=false",
-        ...args,
-      ]);
-    const write = (file: string, content: string) => fs.writeFile(path.join(root, file), content);
-    const timing: DiffReadTiming = { durations: {} };
-    const read = () => loadCheckoutDiff({ cwd: root, sessionKey: "fixture" }, timing);
-    const stopDiagnostics = onTrustedInternalDiagnosticEvent(() => undefined, {
-      includeTrusted: ["diagnostic.phase.completed"],
-    });
-    try {
+  () =>
+    withCheckout("openclaw-diff-cache-", async ({ root, git, write, timing, read }) => {
       await git("init", "-b", "main");
       await fs.mkdir(path.join(root, "nested"));
       await write("nested/tracked.txt", "before\n");
@@ -470,11 +419,5 @@ it.skipIf(process.platform === "win32")(
       const changed = await read();
       expect(changed.files[0]?.binary).toBe(true);
       expect(changed.files[0]?.patch).toBeUndefined();
-    } finally {
-      stopDiagnostics();
-      await drainGlobalSingletonLifecycleState("restart");
-      vi.restoreAllMocks();
-      vi.unstubAllEnvs();
-    }
-  },
+    }),
 );

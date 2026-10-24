@@ -99,6 +99,10 @@ async function createTarget() {
   return { config, generation, scope, commit, replace, admit, ...scope };
 }
 
+const lookupCall = { role: "assistant", content: [{ type: "toolCall", id: "lookup-call" }] };
+const lookupResult = { role: "toolResult", toolCallId: "lookup-call", isError: false };
+const automationResult = { role: "assistant", model: "automation-result" };
+
 it("commits during an active turn, preserves append order, and deduplicates retry", async ({
   signal,
 }) => {
@@ -223,18 +227,14 @@ it("preserves live and replayed tool results when automation commits during tool
     finishTool.resolve();
     await withinTest(turn, signal);
     expect(requests).toHaveLength(2);
-    expect(requests[1]).toMatchObject([
-      { role: "user" },
-      { role: "assistant", content: [{ type: "toolCall", id: "lookup-call" }] },
-      { role: "toolResult", toolCallId: "lookup-call", isError: false },
-    ]);
+    expect(requests[1]).toMatchObject([{ role: "user" }, lookupCall, lookupResult]);
     const reopened = await SessionManager.openAsync(target.scope);
     const stored = reopened.buildSessionContext().messages;
     expect(stored).toMatchObject([
       { role: "user" },
-      { role: "assistant", content: [{ type: "toolCall", id: "lookup-call" }] },
-      { role: "assistant", model: "automation-result" },
-      { role: "toolResult", toolCallId: "lookup-call", isError: false },
+      lookupCall,
+      automationResult,
+      lookupResult,
       { role: "assistant" },
     ]);
     const replay = await sanitizeSessionHistory({
@@ -260,7 +260,7 @@ it("preserves live and replayed tool results when automation commits during tool
         content: [{ type: "text", text: "Actual lookup result" }],
         isError: false,
       },
-      { role: "assistant", model: "automation-result" },
+      automationResult,
       { role: "assistant" },
     ]);
     const call = transformed[1];
@@ -381,14 +381,14 @@ it.each([false, true])(
   async (paused) => {
     const target = await createTarget();
     if (paused) {
-      const scope = target.scope;
-      const database = openOpenClawAgentDatabase(toDatabaseOptions(resolveSqliteScope(scope)));
+      const database = openOpenClawAgentDatabase(
+        toDatabaseOptions(resolveSqliteScope(target.scope)),
+      );
       writeSessionEntry(
         database,
         target.sessionKey,
         {
-          sessionId: target.sessionId,
-          lifecycleRevision: target.generation.lifecycleRevision,
+          ...target.generation,
           updatedAt: 1,
           providerReview: {
             id: "review",
@@ -414,18 +414,13 @@ it.each([false, true])(
     const commit = await target.commit({
       text: "Example report\nreport.png",
       prepareDisplayContent: async () => content,
-      idempotencyKey: "cron-current-completion:cron:job-media:4000",
-      provenance: { kind: "cron", jobId: "job-media", runId: "cron:job-media:4000" },
     });
     expect(commit).toMatchObject({ ok: true });
 
     const events = await loadTranscriptEvents(target.scope);
-    const messageEvent = events.find(
-      (event) =>
-        readTranscriptEventMessage(event)?.idempotencyKey ===
-        "cron-current-completion:cron:job-media:4000",
-    );
-    const message = readTranscriptEventMessage(messageEvent);
+    const message = events
+      .map(readTranscriptEventMessage)
+      .find((entry) => entry?.idempotencyKey === "cron-current-completion:cron:job-1:1000");
     expect({ content: message?.content, display: message?.openclawDisplayContent }).toEqual({
       content: [{ type: "text", text: "Example report\nreport.png" }],
       display: content,
@@ -433,28 +428,15 @@ it.each([false, true])(
   },
 );
 
-it("refuses an archived target conversation", async () => {
-  const target = await createTarget();
-  await target.replace({ archivedAt: 2 });
-
-  await expect(target.commit()).resolves.toMatchObject({
-    ok: false,
-    reason: expect.stringContaining("archived"),
-  });
-});
-
 it("does not commit when cancelled during display preparation", async () => {
   const target = await createTarget();
   const controller = new AbortController();
   await expect(
     target.commit({
-      text: "Cancelled report",
       prepareDisplayContent: async () => {
         controller.abort();
         return [{ type: "text", text: "Cancelled report" }];
       },
-      idempotencyKey: "cancelled-completion",
-      provenance: { kind: "cron", jobId: "cancelled-job", runId: "cancelled-run" },
       signal: controller.signal,
     }),
   ).rejects.toMatchObject({ name: "AbortError" });
@@ -462,29 +444,32 @@ it("does not commit when cancelled during display preparation", async () => {
 });
 
 it.each([
-  {
-    name: "session-id replacement",
-    sessionId: "replacement-session",
-    lifecycleRevision: "replacement-revision",
-  },
-  {
-    name: "same-id lifecycle replacement",
-    sessionId: "source-session",
-    lifecycleRevision: "replacement-revision",
-  },
-])("refuses a result captured before $name", async ({ name: _name, ...replacement }) => {
-  const target = await createTarget();
-  await target.replace(replacement);
+  ["archived conversation", { archivedAt: 2 }, "archived"],
+  ["session-id replacement", { sessionId: "replacement-session" }, "session rebound"],
+  [
+    "same-id lifecycle replacement",
+    { lifecycleRevision: "replacement-revision" },
+    "session rebound",
+  ],
+] satisfies [string, Partial<SessionEntry>, string][])(
+  "refuses %s",
+  async (_, replacement, reason) => {
+    const target = await createTarget();
+    await target.replace(replacement);
 
-  await expect(target.commit()).resolves.toMatchObject({
-    ok: false,
-    reason: expect.stringContaining("session rebound"),
-  });
+    await expect(target.commit()).resolves.toMatchObject({
+      ok: false,
+      reason: expect.stringContaining(reason),
+    });
 
-  await expect(
-    loadTranscriptEvents({ ...target.scope, sessionId: replacement.sessionId }),
-  ).resolves.toEqual([]);
-});
+    await expect(
+      loadTranscriptEvents({
+        ...target.scope,
+        sessionId: replacement.sessionId ?? target.sessionId,
+      }),
+    ).resolves.toEqual([]);
+  },
+);
 
 it("treats a missing lifecycle revision as exact generation state", async () => {
   const target = await createTarget();
@@ -494,7 +479,6 @@ it("treats a missing lifecycle revision as exact generation state", async () => 
   await expect(
     target.commit({
       expectedGeneration: generation,
-      text: "This still belongs to the revision-less session.",
       idempotencyKey: "cron-current-completion:cron:job-legacy:4000",
       provenance: { kind: "cron", jobId: "job-legacy", runId: "cron:job-legacy:4000" },
     }),
@@ -504,7 +488,6 @@ it("treats a missing lifecycle revision as exact generation state", async () => 
   await expect(
     target.commit({
       expectedGeneration: generation,
-      text: "Do not append after the generation changes.",
       idempotencyKey: "cron-current-completion:cron:job-legacy:5000",
       provenance: { kind: "cron", jobId: "job-legacy", runId: "cron:job-legacy:5000" },
     }),
