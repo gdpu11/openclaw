@@ -16,7 +16,6 @@ import {
   noteActiveCronJobRemoval,
   requestActiveCronJobCancellation,
 } from "../cron/active-jobs.js";
-import { makeCronJob } from "../cron/delivery.test-helpers.js";
 import { createNoopLogger } from "../cron/service.test-harness.js";
 import { createCronCompletionDeliveryFence } from "../cron/service/delivery-attempt-fence.js";
 import { markServiceCronJobActive } from "../cron/service/run-receipts.js";
@@ -73,20 +72,28 @@ async function createCompletionFixture(
   };
   const generation = { sessionId: source.sessionId, lifecycleRevision: "creator-generation" };
   const executionSessionKey = `agent:main:cron:${kind}-job`;
+  // Keep the v2026.9.9 persisted shape independent of current job defaults.
+  const releasedJob = {
+    id: `${kind}-job`,
+    agentId: "main",
+    name: "test",
+    enabled: true,
+    createdAtMs: 1,
+    schedule: { kind: "every", everyMs: 60_000 },
+    sessionTarget: "isolated",
+    wakeMode: "next-heartbeat",
+    payload:
+      kind === "script"
+        ? { kind: "script", script: "return { notify: 'Script finished' };" }
+        : { kind: "command", argv: ["printf", "Command finished"] },
+    delivery: { mode: "announce", channel: "telegram", to: "123" },
+    state: {},
+  } satisfies Omit<CronStoredJob, "updatedAtMs">;
   const job: CronStoredJob = {
-    ...makeCronJob({
-      id: `${kind}-job`,
-      agentId: "main",
-      createdAtMs: 1,
-      updatedAtMs: 1,
-      sessionKey: executionSessionKey,
-      payload:
-        kind === "script"
-          ? { kind: "script", script: "return { notify: 'Script finished' };" }
-          : { kind: "command", argv: ["printf", "Command finished"] },
-      delivery: { mode: "announce", channel: "telegram", to: "123" },
-      state: { runningAtMs: 1000 },
-    }),
+    ...releasedJob,
+    updatedAtMs: 1,
+    sessionKey: executionSessionKey,
+    state: { runningAtMs: 1000 },
     sourceConversation: { sessionKey: source.sessionKey, ...generation },
   };
   const otherScopes = [
@@ -228,24 +235,7 @@ async function createCompletionFixture(
     },
     finalize,
     async loadReleasedRows() {
-      // v2026.9.9: types.ts CronStoredJob and store/row-codec.ts persisted config.
-      // Jobs from that release did not capture a creating conversation.
-      const jobJson = JSON.stringify({
-        id: `${kind}-job`,
-        agentId: "main",
-        name: "test",
-        enabled: true,
-        createdAtMs: 1,
-        schedule: { kind: "every", everyMs: 60_000 },
-        sessionTarget: "isolated",
-        wakeMode: "next-heartbeat",
-        payload:
-          kind === "script"
-            ? { kind: "script", script: "return { notify: 'Script finished' };" }
-            : { kind: "command", argv: ["printf", "Command finished"] },
-        delivery: { mode: "announce", channel: "telegram", to: "123" },
-        state: {},
-      });
+      const jobJson = JSON.stringify(releasedJob);
       runOpenClawStateWriteTransaction(({ db }) => {
         db.prepare("UPDATE cron_jobs SET job_json = ? WHERE store_key = ? AND job_id = ?").run(
           jobJson,

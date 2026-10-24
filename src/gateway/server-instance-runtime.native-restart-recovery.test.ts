@@ -83,6 +83,25 @@ afterEach(() => {
   resetTestPluginRegistry();
 });
 
+function createRecoveryRuntime(context: ReturnType<typeof createDirectChatContext>) {
+  return createGatewayInstanceRuntime({
+    getContext: () => context,
+    getMethodRegistry: () => createRequestGatewayMethodRegistry(),
+    isDispatchAvailable: () => true,
+  });
+}
+
+async function appendInterruptedTurn(target: Parameters<typeof appendTranscriptMessage>[0]) {
+  for (const message of [
+    { role: "user", content: "Continue the accepted task", timestamp: 1 },
+    { role: "assistant", content: [], stopReason: "aborted", timestamp: 2 },
+  ]) {
+    await appendTranscriptMessage(target, { message });
+  }
+}
+
+const settledRecovery = { started: 0, settled: 1, failed: 0, skipped: 0 };
+
 describe("cold restart recovery of native operator input", () => {
   it("retires stale operator recovery once and admits new messages to the rotated session", async () => {
     await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
@@ -105,20 +124,11 @@ describe("cold restart recovery of native operator input", () => {
         mainRestartRecovery: { cycleId: "failed-recovery", revision: 1, chargedAttempts: 1 },
         restartRecoveryRuns: [{ runId: target.sourceRunId, lifecycleGeneration: "before-restart" }],
       });
-      await appendTranscriptMessage(target, {
-        message: { role: "user", content: "Continue the accepted task", timestamp: 1 },
-      });
-      await appendTranscriptMessage(target, {
-        message: { role: "assistant", content: [], stopReason: "aborted", timestamp: 2 },
-      });
+      await appendInterruptedTurn(target);
       const originalTranscript = await loadTranscriptEvents(target);
       await cleanupSessionStateForTest({ stateDir: state.stateDir });
       rotateAgentEventLifecycleGeneration();
-      const runtime = createGatewayInstanceRuntime({
-        getContext: () => context,
-        getMethodRegistry: () => createRequestGatewayMethodRegistry(),
-        isDispatchAvailable: () => true,
-      });
+      const runtime = createRecoveryRuntime(context);
       context.recoveryRuntime = runtime.recovery;
       const admit = () =>
         admitTestReplyTurn({
@@ -211,22 +221,13 @@ describe("cold restart recovery of native operator input", () => {
           lifecycleRunId: fixture.target.sourceRunId,
           pendingFinalDelivery,
         });
-        await appendTranscriptMessage(fixture.target, {
-          message: { role: "user", content: "Continue the accepted task", timestamp: 1 },
-        });
-        await appendTranscriptMessage(fixture.target, {
-          message: { role: "assistant", content: [], stopReason: "aborted", timestamp: 2 },
-        });
+        await appendInterruptedTurn(fixture.target);
         await cleanupSessionStateForTest({ stateDir: state.stateDir });
         rotateAgentEventLifecycleGeneration();
         if (revoked) {
           setUserProfileRole(profile.id, "revoked-role");
         }
-        const runtime = createGatewayInstanceRuntime({
-          getContext: () => context,
-          getMethodRegistry: () => createRequestGatewayMethodRegistry(),
-          isDispatchAvailable: () => true,
-        });
+        const runtime = createRecoveryRuntime(context);
         startTurn.mockImplementation(async ({ principal, io, preflight }) => {
           expect(principal?.internal?.operatorRunAuthority?.scopes).toEqual(scopes);
           io.emitAcceptance([
@@ -246,12 +247,7 @@ describe("cold restart recovery of native operator input", () => {
               handledSessionKeys: new Set(),
               gatewayRuntime: runtime.recovery,
             });
-          expect(await recover(), warnings.join("\n")).toEqual({
-            started: 0,
-            settled: 1,
-            failed: 0,
-            skipped: 0,
-          });
+          expect(await recover(), warnings.join("\n")).toEqual(settledRecovery);
           const settledTranscript = await loadTranscriptEvents(fixture.target);
           await recover();
           expect(await loadTranscriptEvents(fixture.target)).toEqual(settledTranscript);
@@ -472,11 +468,7 @@ describe("cold restart recovery of native operator input", () => {
       await cleanupSessionStateForTest({ stateDir: state.stateDir });
       rotateAgentEventLifecycleGeneration();
       const context = makeContext();
-      const runtime = createGatewayInstanceRuntime({
-        getContext: () => context,
-        getMethodRegistry: () => createRequestGatewayMethodRegistry(),
-        isDispatchAvailable: () => true,
-      });
+      const runtime = createRecoveryRuntime(context);
       let turnRegistration: ReturnType<typeof registerChatAbortController> | undefined;
       startTurn.mockImplementation(
         async ({ principal, assertAdmissionCurrent, controllerInput, io }) => {
@@ -600,7 +592,7 @@ describe("cold restart recovery of native operator input", () => {
           gatewayRuntime: runtime.recovery,
         });
         if (sourceMissing) {
-          expect(result).toEqual({ started: 0, settled: 1, failed: 0, skipped: 0 });
+          expect(result).toEqual(settledRecovery);
           expect(startTurn).not.toHaveBeenCalled();
           const entry = await readSessionEntryReadOnlyInWorker(fixture.target);
           expect(entry).toMatchObject({
@@ -615,7 +607,7 @@ describe("cold restart recovery of native operator input", () => {
         } else if (sourceMismatch) {
           // Current Gateway restoration owns exact-claim validation, not the
           // transcript classifier. Refusal must precede turn/tool execution.
-          expect(result).toEqual({ started: 0, settled: 1, failed: 0, skipped: 0 });
+          expect(result).toEqual(settledRecovery);
           expect(startTurn).not.toHaveBeenCalled();
           const entry = await readSessionEntryReadOnlyInWorker(fixture.target);
           expect(entry?.lastRunError).toBe(
@@ -634,12 +626,7 @@ describe("cold restart recovery of native operator input", () => {
           });
           expect(startTurn).toHaveBeenCalledOnce();
         } else {
-          expect(result, warnings.join("\n")).toEqual({
-            started: 0,
-            settled: 1,
-            failed: 0,
-            skipped: 0,
-          });
+          expect(result, warnings.join("\n")).toEqual(settledRecovery);
           expect(startTurn).toHaveBeenCalledOnce();
         }
         const jobs = (await loadCronStore(cronStorePath)).jobs;
