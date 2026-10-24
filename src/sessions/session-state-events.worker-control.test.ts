@@ -310,13 +310,13 @@ describe("Session signal worker reconciliation", () => {
           agentId: "main",
         }),
     ],
-  ] as const)("settles %s once after an unknown signal outcome", async (_name, record) => {
+  ] as const)("settles %s once after an unknown signal outcome", async (_name, recordSignal) => {
     edge.execute.mockRejectedValueOnce(
       Object.assign(new Error("Synthetic lost signal reply"), {
         code: "outcome-unknown",
       }),
     );
-    await expect(record()).resolves.toBeUndefined();
+    await expect(recordSignal()).resolves.toBeUndefined();
     expect(edge.execute).toHaveBeenCalledTimes(1);
     expect(edge.notice).not.toHaveBeenCalled();
   });
