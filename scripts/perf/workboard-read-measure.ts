@@ -172,6 +172,11 @@ function checkBoards(payload: Record<string, unknown>) {
   assert.equal(total, boardCount * cardsPerBoard);
 }
 try {
+  const readyDeadline = Date.now() + 60_000;
+  while (!(await fetch(`http://127.0.0.1:${port}/readyz`)).ok) {
+    assert(Date.now() < readyDeadline, "Gateway did not become ready");
+    await delay(100);
+  }
   for (let index = 0; index < (values.prepare ? 1 : clientCount); index++) {
     const challenge = Promise.withResolvers<{ nonce: string; ts: number }>();
     const peer = createGatewayWsClient({
