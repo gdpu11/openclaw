@@ -78,6 +78,8 @@ const integer = (raw: string, label: string, min: number) =>
 const minutes = integer(values.minutes, "--minutes", 1);
 const settleSeconds = integer(values["settle-seconds"], "--settle-seconds", 0);
 const configReloads = integer(values["config-reloads"], "--config-reloads", 0);
+const needsDevice = values.subscribe || configReloads > 0;
+const traceGc = configReloads === 0;
 const port = integer(values.port, "--port", 40000);
 const startAt = values["start-at"] ? integer(values["start-at"], "--start-at", 1) : undefined;
 if (port > 65535) {
@@ -118,7 +120,7 @@ writeFileSync(
           userHeader: "x-forwarded-user",
           requiredHeaders: ["x-forwarded-proto"],
           allowUsers: ["idle-measure"],
-          ...(values.subscribe
+          ...(needsDevice
             ? { deviceAutoApprove: { enabled: true, scopes: ["operator.read"] } }
             : {}),
         },
@@ -147,7 +149,7 @@ const env = createGatewayBenchEnv(path.join(state ?? output, "home"), configPath
 });
 const args = [
   ...gatewayBenchCpuProfileArgs(values["cpu-profile-dir"]),
-  "--trace-gc-nvp",
+  ...(traceGc ? ["--trace-gc-nvp"] : []),
   "--import",
   path.resolve("scripts/tsx.mjs"),
   "--import",
@@ -264,7 +266,7 @@ try {
   };
   const scopes = ["operator.read"];
   let device;
-  if (values.subscribe) {
+  if (needsDevice) {
     const { nonce, ts } = await Promise.race([
       challenge.promise,
       wait(12_000).then(() => {
@@ -409,13 +411,14 @@ try {
   if (!diagnostics || diagnostics.collectionErrors > 0) {
     throw new Error("Idle measurement has incomplete diagnostic accounting");
   }
-  const promotion = values.profile
-    ? undefined
-    : readGatewayGcTrace(
-        logPath,
-        values.allocations ? heapProfilePath : diagnosticsId,
-        values.allocations ? "heap" : "diagnostics",
-      );
+  const promotion =
+    values.profile || !traceGc
+      ? undefined
+      : readGatewayGcTrace(
+          logPath,
+          values.allocations ? heapProfilePath : diagnosticsId,
+          values.allocations ? "heap" : "diagnostics",
+        );
   writeFileSync(
     path.join(output, "result.json"),
     JSON.stringify(
