@@ -65,6 +65,26 @@ if (isMainThread) {
   if (!process.send) {
     throw new Error("Gateway profiling requires the benchmark IPC channel");
   }
+  const sourceGatewayEntry = new URL("../../src/entry.ts", import.meta.url);
+  const entryPath =
+    process.argv[1] &&
+    realpathSync(process.argv[1].startsWith("file:") ? new URL(process.argv[1]) : process.argv[1]);
+  const isSourceGateway = entryPath === realpathSync(sourceGatewayEntry);
+  if (isSourceGateway && process.platform === "linux") {
+    const { runtimeProcessEntrypoints } =
+      await import("../../src/infra/runtime-process-entrypoints.ts");
+    const { registerSealedRuntimeProcessEntrypoint } =
+      await import("../../src/infra/runtime-process-url.ts");
+    const { resolveRuntimeWorkerUrl } = await import("../../src/infra/runtime-worker-url.ts");
+    // Kernel wait ownership requires a dedicated built process without source-loader children.
+    registerSealedRuntimeProcessEntrypoint(
+      "serviceChildGroupAnchor",
+      resolveRuntimeWorkerUrl({
+        ...runtimeProcessEntrypoints.serviceChildGroupAnchor,
+        root: fileURLToPath(new URL("../../", import.meta.url)),
+      }),
+    );
+  }
   if (process.env.OPENCLAW_BENCH_DISABLE_INLINING === "1") {
     v8.setFlagsFromString("--no-turbo-inlining --no-maglev-inlining");
   }
@@ -90,17 +110,14 @@ if (isMainThread) {
     retainToolContext ||
     toolExecutionSource
   ) {
-    const entry = new URL("../../src/entry.ts", import.meta.url);
     const distDirectory = new URL("../../dist/", import.meta.url);
-    const entryPath = process.argv[1] && realpathSync(process.argv[1]);
-    const sourceEntry = entryPath === realpathSync(entry);
     const distProjection =
-      !sourceEntry &&
+      !isSourceGateway &&
       entryPath !== undefined &&
       path.dirname(entryPath) === path.resolve(fileURLToPath(distDirectory)) &&
       ["entry.js", "index.js"].includes(path.basename(entryPath));
     if (
-      !sourceEntry &&
+      !isSourceGateway &&
       (!distProjection ||
         broadcastTiming ||
         sessionProjectionSource ||

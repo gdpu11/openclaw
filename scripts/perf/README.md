@@ -4204,6 +4204,9 @@ normalizing the whole-window profile by delivered session events.
 
 For session-projection comparisons from one installed checkout, add
 `--entry src/entry.ts --session-projection-source <directory>` to both arms.
+On Linux, source-entry profiling binds the prepared checkout's built native process
+owner. Build that runtime before running shell-tool workloads; native descendant
+ownership deliberately rejects an owner with source-loader hooks.
 The directory must contain all ten coherent owner files:
 `server-broadcast.ts`, `session-event-projection.ts`, `session-row-presentation.ts`,
 `session-sharing-read.ts`, `session-utils-list.ts`, `session-row-placement-projection.ts`,
