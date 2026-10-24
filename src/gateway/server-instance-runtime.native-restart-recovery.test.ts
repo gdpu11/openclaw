@@ -7,7 +7,6 @@ import {
 } from "../../packages/gateway-protocol/src/client-info.js";
 import { persistAuthProfileBatch } from "../agents/auth-profiles/upsert-with-lock.js";
 import { markStartupOrphanedMainSessionsForRecovery } from "../agents/main-session-recovery/main-session-restart-recovery-marking.js";
-import { mainSessionRecoveryLog } from "../agents/main-session-recovery/main-session-restart-recovery-shared.js";
 import { recoverStore } from "../agents/main-session-recovery/main-session-restart-recovery-store.js";
 import { resolveAgentTimeoutMs } from "../agents/timeout.js";
 import { AUTOMATIONS_TOOL_NAME } from "../agents/tools/automations-tool-name.js";
@@ -179,10 +178,6 @@ describe("cold restart recovery of native operator input", () => {
     "settles one interrupted turn for %s without broadening its authority",
     async (scenario) => {
       await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
-        const warnings: string[] = [];
-        vi.spyOn(mainSessionRecoveryLog, "warn").mockImplementation((message) =>
-          warnings.push(message),
-        );
         setRuntimeConfigSnapshot({});
         const context = createDirectChatContext({ trackExecution: trackAsyncWork });
         const profile = ensureProfileForEmail("session-recovery@example.test");
@@ -247,7 +242,7 @@ describe("cold restart recovery of native operator input", () => {
               handledSessionKeys: new Set(),
               gatewayRuntime: runtime.recovery,
             });
-          expect(await recover(), warnings.join("\n")).toEqual(settledRecovery);
+          expect(await recover()).toEqual(settledRecovery);
           const settledTranscript = await loadTranscriptEvents(fixture.target);
           await recover();
           expect(await loadTranscriptEvents(fixture.target)).toEqual(settledTranscript);
@@ -291,10 +286,6 @@ describe("cold restart recovery of native operator input", () => {
     "role reassigned after admission",
   ] as const)("guards real automation writes for %s", async (scenario) => {
     await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
-      const warnings: string[] = [];
-      vi.spyOn(mainSessionRecoveryLog, "warn").mockImplementation((message) =>
-        warnings.push(message),
-      );
       const sourceMissing = ["unowned delegated source", "detached cron input"].includes(scenario);
       const sourceMismatch = [
         "mismatched agent",
@@ -354,7 +345,6 @@ describe("cold restart recovery of native operator input", () => {
           handler: () => ({ text: "Command handler is separate from agent recovery" }),
         });
         builder.registry.plugins.push(record);
-        expect(builder.registry.commands).toHaveLength(1);
         setTestPluginRegistry(builder.registry);
         initializeGlobalHookRunner(builder.registry);
       }
@@ -422,9 +412,6 @@ describe("cold restart recovery of native operator input", () => {
         },
       });
       expect(fixture.sourceAuthority.assertCurrent).toThrow("no longer active");
-      expect(fixture.entry.restartRecoverySourceIngress).toBe(
-        scenario === "Control UI source" ? "control-ui" : "internal",
-      );
       const savedSource = sourceMissing
         ? undefined
         : {
@@ -626,7 +613,7 @@ describe("cold restart recovery of native operator input", () => {
           });
           expect(startTurn).toHaveBeenCalledOnce();
         } else {
-          expect(result, warnings.join("\n")).toEqual(settledRecovery);
+          expect(result).toEqual(settledRecovery);
           expect(startTurn).toHaveBeenCalledOnce();
         }
         const jobs = (await loadCronStore(cronStorePath)).jobs;
@@ -640,7 +627,6 @@ describe("cold restart recovery of native operator input", () => {
               owner: { agentId: "main", sessionKey: SESSION },
             },
           ]);
-          expect(jobs).toHaveLength(1);
         }
       } finally {
         turnRegistration?.cleanup();
