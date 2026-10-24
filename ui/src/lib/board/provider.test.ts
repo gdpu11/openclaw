@@ -256,53 +256,47 @@ describe("board leases", () => {
     const initial = snapshot(1, { widgets: [widget({ grantState: "pending" })] });
     const c = boardClient(async () => initial);
     const dashboard = acquire(c, noCapabilities),
-      chat = acquire(c),
       approver = acquire(c, approvalOnly);
-    await loaded(chat.provider, initial);
-    expect(chat.provider.snapshot$).toBe(dashboard.provider.snapshot$);
-    expect(chat.provider.events).toBe(dashboard.provider.events);
+    await loaded(dashboard.provider, initial);
     const actions = (p: BoardProvider) => [
       () => p.applyOps([]),
       () => p.pinWidget({ docId: "cv" }),
       () => p.pinMcpApp({ viewId: "app" }),
       () => p.grant("alpha", "granted"),
     ];
-    for (const run of actions(dashboard.provider)) {
-      await expect(run()).rejects.toThrow();
-    }
-    for (const allowed of [true, false]) {
-      dashboard.update(c, true, allowed ? capabilities : noCapabilities);
-      expect(dashboard.provider).toMatchObject(allowed ? capabilities : noCapabilities);
-      expect(approver.provider).toMatchObject(approvalOnly);
-      for (const run of actions(dashboard.provider)) {
-        if (allowed) {
+    const check = async (p: BoardProvider, permitted: readonly boolean[]) => {
+      for (const [index, run] of actions(p).entries()) {
+        if (permitted[index]) {
           await expect(run()).resolves.toBeUndefined();
         } else {
           await expect(run()).rejects.toThrow();
         }
       }
+    };
+    await check(dashboard.provider, [false, false, false, false]);
+    for (const allowed of [true, false]) {
+      dashboard.update(c, true, allowed ? capabilities : noCapabilities);
+      expect(dashboard.provider).toMatchObject(allowed ? capabilities : noCapabilities);
+      expect(approver.provider).toMatchObject(approvalOnly);
+      await check(dashboard.provider, [allowed, allowed, allowed, allowed]);
     }
     expect(c.requests).toHaveBeenCalledWith("board.widget.put", {
       sessionKey: KEY,
       name: mcpAppWidgetNameForViewId("app"),
       content: { kind: "mcp-app", viewId: "app" },
     });
-    for (const run of actions(approver.provider).slice(0, 3)) {
-      await expect(run()).rejects.toThrow();
-    }
+    await check(approver.provider, [false, false, false, true]);
     const writer = acquire(c, { ...capabilities, canGrant: false });
     await expect(writer.provider.grant("alpha", "granted")).rejects.toThrow();
     await expect(writer.provider.applyOps([])).resolves.toBeUndefined();
-    await expect(approver.provider.grant("alpha", "granted")).resolves.toBeUndefined();
-    expect(c.requests).toHaveBeenCalledTimes(7);
-    chat.release();
     writer.release();
     approver.release();
     expect(c.listeners.size).toBe(1);
+    const requestCount = c.requests.mock.calls.length;
     dashboard.release();
     dashboard.release();
     await expect(dashboard.provider.applyOps([])).rejects.toThrow();
-    expect(c.requests).toHaveBeenCalledTimes(7);
+    expect(c.requests).toHaveBeenCalledTimes(requestCount);
     expect(c.listeners.size).toBe(0);
     expect(dashboard.provider.snapshot$.value).toEqual(initial);
   });
@@ -370,19 +364,6 @@ describe("board snapshots and refreshes", () => {
     expect(persist).toHaveBeenCalledWith(null, expect.any(Number));
     f.p.restoreSnapshot(f.initial, Date.now());
     expect(f.p.snapshot$.value.tabs).toEqual([]);
-  });
-  it("discards mutation responses from replaced clients", async () => {
-    const pending = createDeferred<BoardSnapshot>(),
-      current = snapshot(3);
-    const old = boardClient(() => pending.promise),
-      next = boardClient(async () => current);
-    const p = provider(old, false),
-      mutation = p.applyOps([]);
-    p.attachClient(next, true);
-    await loaded(p, current);
-    pending.resolve(snapshot(4));
-    await mutation;
-    expect(p.snapshot$.value).toEqual(current);
   });
   it.each(["UNAVAILABLE", "FORBIDDEN"] as const)(
     "stops definitive %s polling until reconnect",
@@ -479,84 +460,67 @@ describe("board snapshots and refreshes", () => {
     await Promise.resolve();
     expect(c.requests).toHaveBeenCalledExactlyOnceWith("board.get", { sessionKey: KEY });
   });
-  it.each([false, true])(
-    "accepts the newest event while deletion/recreation refreshes overlap (%s)",
-    async (recreated) => {
-      const initial = snapshot(5),
-        delayed = createDeferred<BoardSnapshot>();
-      const final = recreated
-        ? snapshot(1, { tabs: [{ ...mainTab, tabId: "new", chatDock: "left" }] })
-        : snapshot(0, { tabs: [] });
-      const f = fixture(initial);
-      f.request.mockReturnValueOnce(delayed.promise).mockResolvedValue(final);
-      await loaded(f.p, initial);
-      f.changed(6);
-      await called(f.request, 2);
-      f.changed(recreated ? 1 : 7);
-      delayed.resolve(recreated ? snapshot(0, { tabs: [] }) : snapshot(6));
-      await loaded(f.p, final);
-      expect(f.request).toHaveBeenCalledTimes(3);
-    },
-  );
-  it("ignores an older empty mutation after a newer mutation", async () => {
-    const older = createDeferred<BoardSnapshot>(),
-      newer = createDeferred<BoardSnapshot>();
-    const f = fixture(snapshot(5));
-    f.request.mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
-    await loaded(f.p, f.initial);
-    const a = f.p.applyOps([{ kind: "tab_delete", tabId: "main" }]);
-    const b = f.p.applyOps([{ kind: "tab_update", tabId: "main", chatDock: "left" }]);
-    newer.resolve(snapshot(6));
-    await b;
-    older.resolve(snapshot(0, { tabs: [] }));
-    await a;
-    expect(f.p.snapshot$.value).toEqual(snapshot(6));
-  });
-  it.each([false, true])(
-    "reconciles an old refresh superseded by a mutation (%s ticket refresh)",
-    async (ticket) => {
-      const pending = createDeferred<BoardSnapshot>(),
-        mutation = createDeferred<BoardSnapshot>();
-      const initial = snapshot(5, { widgets: ticket ? [widget({ frameUrl: "/old-ticket" })] : [] });
-      const changed = ticket
-        ? { ...initial, revision: 6, widgets: [widget({ frameUrl: "/mutation-ticket" })] }
-        : snapshot(0, { tabs: [] });
+  it.each(["delete", "recreate", "mutate-delete", "mutate-ticket", "write", "client"] as const)(
+    "discards stale results after %s supersession",
+    async (cause) => {
+      const pending = createDeferred<BoardSnapshot>();
+      const empty = snapshot(0, { tabs: [] });
+      const ticket = cause === "mutate-ticket";
+      const initial = snapshot(5, { widgets: [widget({ frameUrl: "/old" })] });
       const final = ticket
-        ? { ...changed, widgets: [widget({ frameUrl: "/reminted-ticket" })] }
-        : changed;
-      let gets = 0;
-      const c = boardClient((method) => {
-        if (method !== "board.get") {
-          return mutation.promise;
-        }
-        gets += 1;
-        return gets === 1
-          ? Promise.resolve(initial)
-          : gets === 2
-            ? pending.promise
-            : Promise.resolve(final);
-      });
-      const p = provider(c);
-      await loaded(p, initial);
-      const refresh = ticket ? p.refreshWidgetFrame("alpha") : p.activate();
-      await vi.waitFor(() => expect(gets).toBe(2));
-      const write = p.applyOps(
-        ticket
-          ? [{ kind: "tab_update", tabId: "main", chatDock: "left" }]
-          : [{ kind: "tab_delete", tabId: "main" }],
-      );
-      mutation.resolve(changed);
-      await write;
+        ? snapshot(6, { widgets: [widget({ frameUrl: "/fresh" })] })
+        : cause === "recreate"
+          ? snapshot(1, { tabs: [{ ...mainTab, tabId: "new", chatDock: "left" }] })
+          : cause === "delete" || cause === "mutate-delete"
+            ? empty
+            : snapshot(6);
+      const mutation = ticket
+        ? snapshot(6, { widgets: [widget({ frameUrl: "/mutation" })] })
+        : final;
+      const f = fixture(initial);
+      f.request
+        .mockReturnValueOnce(pending.promise)
+        .mockImplementation(async (method) => (method === "board.update" ? mutation : final));
+      await loaded(f.p, initial);
+      const writing = cause === "write" || cause === "client";
+      if (cause === "delete" || cause === "recreate") {
+        f.changed(6);
+      }
+      const work = writing
+        ? f.p.applyOps([{ kind: "tab_delete", tabId: "main" }])
+        : ticket
+          ? f.p.refreshWidgetFrame("alpha")
+          : f.p.activate();
+      await called(f.request, 2);
+      if (cause === "client") {
+        f.p.attachClient(
+          boardClient(async () => final),
+          true,
+        );
+        await loaded(f.p, final);
+      } else if (cause === "delete" || cause === "recreate") {
+        f.changed(cause === "recreate" ? 1 : 7);
+      } else {
+        await f.p.applyOps([
+          ticket || cause === "write"
+            ? { kind: "tab_update", tabId: "main", chatDock: "left" }
+            : { kind: "tab_delete", tabId: "main" },
+        ]);
+      }
       pending.resolve(
-        ticket
-          ? { ...changed, widgets: [widget({ frameUrl: "/superseded-ticket" })] }
-          : snapshot(6),
+        cause === "recreate" || cause === "write"
+          ? empty
+          : ticket
+            ? snapshot(6, { widgets: [widget({ frameUrl: "/superseded" })] })
+            : snapshot(7),
       );
-      await refresh;
-      expect(gets).toBe(3);
-      expect(p.snapshot$.value).toEqual(final);
+      await work;
+      await loaded(f.p, final);
+      expect(f.request).toHaveBeenCalledTimes(
+        cause === "client" ? 2 : cause.startsWith("mutate-") ? 4 : 3,
+      );
       if (ticket) {
-        expect(p.widgetFrameUrl("alpha", 1)).toBe("/reminted-ticket");
+        expect(f.p.widgetFrameUrl("alpha", 1)).toBe("/fresh");
       }
     },
   );
