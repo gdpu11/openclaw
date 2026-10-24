@@ -16,10 +16,31 @@ import {
 } from "../../test-helpers/solid-application-context.tsx";
 import { flush, waitForSolid } from "../../test-helpers/solid-settle.ts";
 import { MemoryImportPage } from "./memory-import-page.tsx";
+import type { SessionBackfillGatewayResult } from "./view-types.ts";
 
 type TestContext = ApplicationContext & { notify(): void };
 
-const waitForMemoryImport = waitForSolid;
+const settle = waitForSolid;
+const calls = (request: ReturnType<typeof vi.fn>, count: number) =>
+  settle(() => expect(request).toHaveBeenCalledTimes(count));
+const textAppears = (page: HTMLElement, text: string) =>
+  settle(() => expect(page.textContent).toContain(text));
+const date = (page: HTMLElement, index = 0) =>
+  page.querySelectorAll<HTMLInputElement>("input[type='date']")[index];
+const collections = (page: HTMLElement) =>
+  page.querySelectorAll<HTMLInputElement>(".memory-import__collection input[type='checkbox']");
+const applyParams = (request: ReturnType<typeof vi.fn>, index: number) =>
+  request.mock.calls[index]?.[1] as { idempotencyKey?: string } | undefined;
+function expectOnlyPlans(request: ReturnType<typeof vi.fn>) {
+  expect(request.mock.calls.every(([method]) => method === "migrations.memory.plan")).toBe(true);
+}
+function refresh(page: HTMLElement) {
+  const control = [...page.querySelectorAll<HTMLButtonElement>("button")].find(
+    (candidate) => candidate.textContent?.trim() === "Refresh",
+  );
+  expect(control).toBeDefined();
+  control!.click();
+}
 
 function createRequest(handlers: Record<string, (params: { agentId?: string }) => unknown>) {
   return vi.fn(async (method: string, params: { agentId?: string }) => {
@@ -47,23 +68,23 @@ function setDate(input: HTMLInputElement, value = "2026-07-01") {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
-function findButton(page: HTMLElement, id: string) {
+function button(page: HTMLElement, id: string) {
   return page.querySelector<HTMLButtonElement>(`[data-test-id='memory-${id}']`);
 }
 
-async function waitForButton(page: HTMLElement, id: string, disabled?: boolean) {
-  await waitForMemoryImport(() => {
-    expect(findButton(page, id)).not.toBeNull();
+async function ready(page: HTMLElement, id: string, disabled?: boolean) {
+  await settle(() => {
+    expect(button(page, id)).not.toBeNull();
     if (disabled !== undefined) {
-      expect(findButton(page, id)?.disabled).toBe(disabled);
+      expect(button(page, id)?.disabled).toBe(disabled);
     }
   });
 }
 
-async function openImportConfirmation(page: HTMLElement) {
-  await waitForButton(page, "import-provider-button");
-  findButton(page, "import-provider-button")?.click();
-  await waitForButton(page, "import-confirm");
+async function openImport(page: HTMLElement) {
+  await ready(page, "import-provider-button");
+  button(page, "import-provider-button")?.click();
+  await ready(page, "import-confirm");
 }
 
 const emptySummary = {
@@ -118,6 +139,21 @@ function createApplyResult(): MigrationsMemoryApplyResult {
   };
 }
 
+function backfillChunk(
+  days = 0,
+  candidates = 0,
+  staged = 0,
+  hasMore = false,
+): SessionBackfillGatewayResult {
+  return {
+    days,
+    candidates,
+    staged,
+    perDay: candidates ? [{ day: "2026-07-01", candidateCount: candidates, sample: [] }] : [],
+    cursor: { advanced: candidates > 0, exhausted: candidates === 0, hasMore },
+  };
+}
+
 function createContext(request: ReturnType<typeof vi.fn>): TestContext {
   const client = { request } as unknown as GatewayBrowserClient;
   const snapshot: ApplicationGatewaySnapshot = createApplicationGatewaySnapshot({
@@ -164,14 +200,12 @@ function createContext(request: ReturnType<typeof vi.fn>): TestContext {
 }
 
 async function mountPage(context: ApplicationContext): Promise<HTMLElement> {
-  const provider = createSolidApplicationContextProvider(context);
-  const view = mountSolid(() => <MemoryImportPage />, { wrapper: provider.wrapper });
+  const { wrapper } = createSolidApplicationContextProvider(context);
+  const view = mountSolid(() => <MemoryImportPage />, { wrapper });
   flush();
   const page = view.container.querySelector<HTMLElement>("openclaw-memory-import-page");
-  if (!page) {
-    throw new Error("expected memory import page");
-  }
-  return page;
+  expect(page).not.toBeNull();
+  return page!;
 }
 
 afterEach(() => {
@@ -194,7 +228,7 @@ describe("MemoryImportPage", () => {
 
     context.gateway.snapshot.phase = "connected";
     context.notify();
-    await waitForButton(page, "import-provider-button");
+    await ready(page, "import-provider-button");
     expect(page.textContent).not.toContain("Connect to the gateway to import memory.");
     expect(page.textContent).toContain("/tmp/openclaw-research");
   });
@@ -214,7 +248,7 @@ describe("MemoryImportPage", () => {
     context.notify();
     expect(request).toHaveBeenCalledTimes(2);
     expect(request.mock.calls[1]?.[1]).toEqual({ agentId: "writer", overwrite: false });
-    await waitForMemoryImport(() => expect(page.textContent).toContain("/tmp/openclaw-writer"));
+    await textAppears(page, "/tmp/openclaw-writer");
 
     firstPlan.resolve(createPlan());
     await firstPlan.promise;
@@ -227,7 +261,7 @@ describe("MemoryImportPage", () => {
     context.notify();
     expect(request).toHaveBeenCalledTimes(3);
     expect(request.mock.calls[2]?.[1]).toEqual({ agentId: "writer", overwrite: true });
-    await waitForButton(page, "import-provider-button", false);
+    await ready(page, "import-provider-button", false);
 
     cleanupSolid();
     context.agentSelection.state.selectedId = "research";
@@ -238,8 +272,10 @@ describe("MemoryImportPage", () => {
 
   it("retains a loaded plan after roster refresh failure and retries the roster on Refresh", async () => {
     const roster = createDeferredCore<unknown>();
+    let rosterReply: Promise<unknown> = roster.promise;
+    let plan = createPlan();
     const request = vi.fn((method: string) =>
-      method === "agents.list" ? roster.promise : Promise.resolve(createPlan()),
+      method === "agents.list" ? rosterReply : Promise.resolve(plan),
     );
     const context = createContext(request);
     const agents = createAgentCapability(context.gateway);
@@ -248,52 +284,31 @@ describe("MemoryImportPage", () => {
     const page = await mountPage({ ...context, agents });
     try {
       roster.reject(new Error("Agent roster unavailable"));
-      request.mockImplementation((method: string) =>
-        method === "agents.list" ? createDeferredCore().promise : Promise.resolve(createPlan()),
-      );
+      rosterReply = createDeferredCore().promise;
       await initial;
       flush();
       flush();
       expect(request).toHaveBeenCalledTimes(1);
       expect(page.textContent).toContain("Agent roster unavailable");
 
-      request.mockImplementation((method: string) =>
-        Promise.resolve(
-          method === "agents.list"
-            ? { defaultId: "research", agents: [{ id: "research", name: "Research" }] }
-            : createPlan(),
-        ),
-      );
-      [...page.querySelectorAll<HTMLButtonElement>("button")]
-        .find((button) => button.textContent?.trim() === "Refresh")
-        ?.click();
-      await waitForButton(page, "import-provider-button");
+      rosterReply = Promise.resolve(agentRoster("research"));
+      refresh(page);
+      await ready(page, "import-provider-button");
       expect(request.mock.calls.filter(([method]) => method === "agents.list")).toHaveLength(2);
       expect(page.textContent).not.toContain("Agent roster unavailable");
-      request.mockImplementation((method: string) =>
-        method === "agents.list"
-          ? Promise.reject(new Error("Agent roster unavailable"))
-          : Promise.resolve(createPlan()),
-      );
+      rosterReply = Promise.reject(new Error("Agent roster unavailable"));
       await agents.refreshList();
       flush();
-      expect(findButton(page, "import-provider-button")).not.toBeNull();
+      expect(button(page, "import-provider-button")).not.toBeNull();
       expect(page.textContent).toContain("/tmp/openclaw-research");
       expect(
         request.mock.calls.filter(([method]) => method === "migrations.memory.plan"),
       ).toHaveLength(1);
 
-      request.mockImplementation((method: string) =>
-        Promise.resolve(
-          method === "agents.list"
-            ? { defaultId: "writer", agents: [{ id: "writer", name: "Writer" }] }
-            : createPlan("writer"),
-        ),
-      );
-      [...page.querySelectorAll<HTMLButtonElement>("button")]
-        .find((button) => button.textContent?.trim() === "Refresh")
-        ?.click();
-      await waitForMemoryImport(() => expect(page.textContent).toContain("/tmp/openclaw-writer"));
+      rosterReply = Promise.resolve(agentRoster("writer"));
+      plan = createPlan("writer");
+      refresh(page);
+      await textAppears(page, "/tmp/openclaw-writer");
       expect(request.mock.calls.filter(([method]) => method === "agents.list")).toHaveLength(4);
       expect(request).toHaveBeenLastCalledWith(
         "migrations.memory.plan",
@@ -332,7 +347,7 @@ describe("MemoryImportPage", () => {
     const context = createContext(request);
     const page = await mountPage(context);
 
-    await waitForMemoryImport(() => expect(request).toHaveBeenCalledTimes(1));
+    await calls(request, 1);
     flush();
     await Promise.resolve();
     context.notify();
@@ -341,14 +356,8 @@ describe("MemoryImportPage", () => {
     expect(page.textContent).toContain("planning unavailable: OPENAI_API_KEY=sk-123...cdef");
     expect(page.textContent).not.toContain("sk-1234567890abcdef");
 
-    const refresh = [...page.querySelectorAll<HTMLButtonElement>("button")].find(
-      (button) => button.textContent?.trim() === "Refresh",
-    );
-    if (!refresh) {
-      throw new Error("expected Refresh button");
-    }
-    refresh.click();
-    await waitForMemoryImport(() => expect(request).toHaveBeenCalledTimes(2));
+    refresh(page);
+    await calls(request, 2);
   });
 
   it("keeps apply recovery results visible when the follow-up plan fails", async () => {
@@ -382,15 +391,15 @@ describe("MemoryImportPage", () => {
     });
     const page = await mountPage(createContext(request));
 
-    await openImportConfirmation(page);
-    findButton(page, "import-confirm")?.click();
+    await openImport(page);
+    button(page, "import-confirm")?.click();
 
-    await waitForMemoryImport(() => expect(request).toHaveBeenCalledTimes(3));
+    await calls(request, 3);
     flush();
     expect(page.textContent).toContain("post-apply planning unavailable");
     expect(page.textContent).toContain("replacement interrupted");
     expect(page.textContent).toContain("/tmp/migration-report");
-    expect(findButton(page, "import-provider-button")?.disabled).toBe(true);
+    expect(button(page, "import-provider-button")?.disabled).toBe(true);
   });
 
   it("admits one same-turn import and unlocks after its successful refresh", async () => {
@@ -403,42 +412,40 @@ describe("MemoryImportPage", () => {
     });
     const page = await mountPage(createContext(request));
 
-    await openImportConfirmation(page);
-    const confirm = findButton(page, "import-confirm");
+    await openImport(page);
+    const confirm = button(page, "import-confirm");
     confirm?.click();
     confirm?.click();
     expect(request).toHaveBeenCalledTimes(2);
 
-    await waitForMemoryImport(() => expect(request).toHaveBeenCalledTimes(3));
-    await waitForButton(page, "import-provider-button", false);
+    await calls(request, 3);
+    await ready(page, "import-provider-button", false);
   });
 
   it("reuses the same frozen idempotency key when a failed apply is retried", async () => {
-    let applyRequests = 0;
     const request = createRequest({
       "migrations.memory.plan": () => createPlan(),
-      "migrations.memory.apply": () => {
-        applyRequests += 1;
-        if (applyRequests === 1) {
+      "migrations.memory.apply": vi
+        .fn()
+        .mockReturnValue(createApplyResult())
+        .mockImplementationOnce(() => {
           throw new Error("response lost");
-        }
-        return createApplyResult();
-      },
+        }),
     });
     const page = await mountPage(createContext(request));
 
-    await openImportConfirmation(page);
-    findButton(page, "import-confirm")?.click();
-    await waitForMemoryImport(() =>
+    await openImport(page);
+    button(page, "import-confirm")?.click();
+    await settle(() =>
       expect(page.querySelector(".memory-import__confirm [role='alert']")?.textContent).toBe(
         "response lost",
       ),
     );
-    findButton(page, "import-confirm")?.click();
+    button(page, "import-confirm")?.click();
 
-    await waitForMemoryImport(() => expect(request).toHaveBeenCalledTimes(4));
-    const firstApply = request.mock.calls[1]?.[1] as { idempotencyKey?: string } | undefined;
-    const retryApply = request.mock.calls[2]?.[1] as { idempotencyKey?: string } | undefined;
+    await calls(request, 4);
+    const firstApply = applyParams(request, 1);
+    const retryApply = applyParams(request, 2);
     expect(firstApply?.idempotencyKey).toMatch(/\S/u);
     expect(retryApply).toEqual(firstApply);
   });
@@ -461,69 +468,57 @@ describe("MemoryImportPage", () => {
     });
     const context = createContext(request);
     const page = await mountPage(context);
-    await waitForMemoryImport(() =>
-      expect(
-        page.querySelectorAll(".memory-import__collection input[type='checkbox']"),
-      ).toHaveLength(2),
-    );
-    page
-      .querySelectorAll<HTMLInputElement>(".memory-import__collection input[type='checkbox']")[1]!
-      .click();
-    setDate(page.querySelector<HTMLInputElement>("input[type='date']")!);
-    findButton(page, "backfill-preview")!.click();
-    await waitForMemoryImport(() => expect(page.textContent).toContain("Retained preview"));
-    await openImportConfirmation(page);
+    await settle(() => expect(collections(page)).toHaveLength(2));
+    collections(page)[1]!.click();
+    setDate(date(page)!);
+    button(page, "backfill-preview")!.click();
+    await textAppears(page, "Retained preview");
+    await openImport(page);
 
     context.gateway.snapshot.phase = "stopped";
     context.gateway.snapshot.hello = null;
     context.notify();
     flush();
     flush();
-    expect(findButton(page, "import-confirm")?.disabled).toBe(true);
-    expect(page.querySelector<HTMLInputElement>("input[type='date']")?.value).toBe("2026-07-01");
+    expect(button(page, "import-confirm")?.disabled).toBe(true);
+    expect(date(page)?.value).toBe("2026-07-01");
     expect(page.textContent).toContain("Retained preview");
 
     context.gateway.snapshot.phase = "connected";
     context.notify();
-    await waitForMemoryImport(() => expect(request).toHaveBeenCalledTimes(3));
-    await waitForButton(page, "import-confirm", false);
-    expect(
-      [
-        ...page.querySelectorAll<HTMLInputElement>(
-          ".memory-import__collection input[type='checkbox']",
-        ),
-      ].map((input) => input.checked),
-    ).toEqual([true, false]);
-    expect(page.querySelector<HTMLInputElement>("input[type='date']")?.value).toBe("2026-07-01");
+    await calls(request, 3);
+    await ready(page, "import-confirm", false);
+    expect([...collections(page)].map((input) => input.checked)).toEqual([true, false]);
+    expect(date(page)?.value).toBe("2026-07-01");
     expect(page.textContent).toContain("Retained preview");
 
     page
       .querySelector<HTMLButtonElement>(".memory-import__confirm button:not([data-test-id])")!
       .click();
-    findButton(page, "backfill-rollback")!.click();
+    button(page, "backfill-rollback")!.click();
     flush();
     context.gateway.snapshot.phase = "reconnecting";
     context.notify();
     flush();
-    expect(findButton(page, "backfill-rollback-confirm")?.disabled).toBe(true);
+    expect(button(page, "backfill-rollback-confirm")?.disabled).toBe(true);
     context.gateway.snapshot.phase = "connected";
     context.notify();
-    await waitForMemoryImport(() => expect(request).toHaveBeenCalledTimes(4));
-    expect(findButton(page, "backfill-rollback-confirm")).not.toBeNull();
+    await calls(request, 4);
+    expect(button(page, "backfill-rollback-confirm")).not.toBeNull();
 
     const replacementClient = { request } as unknown as GatewayBrowserClient;
     context.gateway.snapshot.client = replacementClient;
     context.gateway.snapshot.phase = "connected";
     context.notify();
-    await waitForMemoryImport(() => expect(request).toHaveBeenCalledTimes(5));
-    expect(findButton(page, "import-confirm")).toBeNull();
-    expect(findButton(page, "backfill-rollback-confirm")).toBeNull();
-    expect(page.querySelector<HTMLInputElement>("input[type='date']")?.value).toBe("");
+    await calls(request, 5);
+    expect(button(page, "import-confirm")).toBeNull();
+    expect(button(page, "backfill-rollback-confirm")).toBeNull();
+    expect(date(page)?.value).toBe("");
     expect(page.textContent).not.toContain("Retained preview");
 
     context.gateway.snapshot.hello = gatewayHelloForMethods([], ["operator.read"]);
     context.notify();
-    await waitForMemoryImport(() => expect(page.querySelector(".memory-import")).toBeNull());
+    await settle(() => expect(page.querySelector(".memory-import")).toBeNull());
     expect(page.textContent).not.toContain("/tmp/openclaw-research");
   });
 
@@ -531,12 +526,12 @@ describe("MemoryImportPage", () => {
     "retires protected plans and drafts when the same client's %s identity changes",
     async (identity) => {
       const replacementPlan = createDeferredCore<ReturnType<typeof createPlan>>();
-      let planRequests = 0;
+      const plan = vi
+        .fn()
+        .mockResolvedValueOnce(createPlan())
+        .mockReturnValue(replacementPlan.promise);
       const request = createRequest({
-        "migrations.memory.plan": () => {
-          planRequests += 1;
-          return planRequests === 1 ? Promise.resolve(createPlan()) : replacementPlan.promise;
-        },
+        "migrations.memory.plan": plan,
       });
       const context = createContext(request);
       context.gateway.snapshot.selfUser = { id: "first", name: "First" };
@@ -546,9 +541,9 @@ describe("MemoryImportPage", () => {
         auth: { ...hello.auth, recoveryScope: "first" },
       };
       const page = await mountPage(context);
-      await openImportConfirmation(page);
-      setDate(page.querySelector<HTMLInputElement>("input[type='date']")!);
-      const confirm = findButton(page, "import-confirm")!;
+      await openImport(page);
+      setDate(date(page)!);
+      const confirm = button(page, "import-confirm")!;
 
       if (identity === "account") {
         context.gateway.snapshot.selfUser = { id: "second", name: "Second" };
@@ -561,15 +556,13 @@ describe("MemoryImportPage", () => {
       context.notify();
       // A retained button cannot submit the previous identity's confirmation before rendering catches up.
       confirm.click();
-      expect(request.mock.calls.every(([method]) => method === "migrations.memory.plan")).toBe(
-        true,
-      );
-      await waitForMemoryImport(() => expect(planRequests).toBe(2));
-      expect(findButton(page, "import-confirm")).toBeNull();
-      expect(page.querySelector<HTMLInputElement>("input[type='date']")?.value).toBe("");
+      expectOnlyPlans(request);
+      await calls(plan, 2);
+      expect(button(page, "import-confirm")).toBeNull();
+      expect(date(page)?.value).toBe("");
       expect(page.textContent).not.toContain("/tmp/openclaw-research");
       replacementPlan.resolve(createPlan());
-      await waitForButton(page, "import-provider-button");
+      await ready(page, "import-provider-button");
     },
   );
 
@@ -593,10 +586,10 @@ describe("MemoryImportPage", () => {
       const roster = context.agents.state.agentsList;
       const page = await mountPage(context);
 
-      await openImportConfirmation(page);
-      findButton(page, "import-confirm")?.click();
-      await waitForMemoryImport(() => expect(request).toHaveBeenCalledTimes(2));
-      const firstApply = request.mock.calls[1]?.[1] as { idempotencyKey?: string } | undefined;
+      await openImport(page);
+      button(page, "import-confirm")?.click();
+      await calls(request, 2);
+      const firstApply = applyParams(request, 1);
 
       if (interruption === "disconnect") {
         context.gateway.snapshot.phase = "stopped";
@@ -606,7 +599,7 @@ describe("MemoryImportPage", () => {
       }
       context.notify();
       flush();
-      expect(findButton(page, "import-confirm")?.disabled ?? true).toBe(true);
+      expect(button(page, "import-confirm")?.disabled ?? true).toBe(true);
       firstApplyResult.resolve(result);
       await Promise.resolve();
 
@@ -617,12 +610,12 @@ describe("MemoryImportPage", () => {
         context.agents.state.agentsError = null;
       }
       context.notify();
-      await waitForMemoryImport(() => expect(request).toHaveBeenCalledTimes(3));
-      await waitForButton(page, "import-confirm");
-      findButton(page, "import-confirm")?.click();
-      await waitForMemoryImport(() => expect(request).toHaveBeenCalledTimes(4));
+      await calls(request, 3);
+      await ready(page, "import-confirm");
+      button(page, "import-confirm")?.click();
+      await calls(request, 4);
 
-      const retryApply = request.mock.calls[3]?.[1] as { idempotencyKey?: string } | undefined;
+      const retryApply = applyParams(request, 3);
       expect(firstApply?.idempotencyKey).toMatch(/\S/u);
       expect(retryApply).toEqual(firstApply);
     },
@@ -641,34 +634,30 @@ describe("MemoryImportPage", () => {
       const selection = createAgentSelectionCapability(context.gateway, context.agents);
       const page = await mountPage({ ...context, agentSelection: selection });
       try {
-        await waitForButton(page, "import-provider-button");
+        await ready(page, "import-provider-button");
         if (operation === "import") {
-          await openImportConfirmation(page);
+          await openImport(page);
         } else {
-          findButton(page, "backfill-rollback")?.click();
+          button(page, "backfill-rollback")?.click();
         }
         const selector =
           operation === "import"
             ? "[data-test-id='memory-import-confirm']"
             : "[data-test-id='memory-backfill-rollback-confirm']";
-        await waitForMemoryImport(() => expect(page.querySelector(selector)).not.toBeNull());
+        await settle(() => expect(page.querySelector(selector)).not.toBeNull());
         const confirm = page.querySelector<HTMLButtonElement>(selector);
 
         selection.set("writer");
         confirm?.click();
         expect(request).toHaveBeenCalledTimes(2);
 
-        await waitForMemoryImport(() => expect(request).toHaveBeenCalledTimes(2));
+        await calls(request, 2);
         expect(request.mock.calls[1]?.[1]).toMatchObject({ agentId: "writer" });
         expect(page.querySelector(selector)).toBeNull();
         nextPlan.reject(new Error("Writer plan unavailable"));
-        await waitForMemoryImport(() =>
-          expect(page.textContent).toContain("Writer plan unavailable"),
-        );
+        await settle(() => expect(page.textContent).toContain("Writer plan unavailable"));
         expect(page.querySelector(selector)).toBeNull();
-        expect(request.mock.calls.every(([method]) => method === "migrations.memory.plan")).toBe(
-          true,
-        );
+        expectOnlyPlans(request);
       } finally {
         cleanupSolid();
         selection.dispose();
@@ -689,34 +678,24 @@ describe("MemoryImportPage", () => {
       context.agents.state.agentsList = agentRoster("research", "writer");
       const page = await mountPage(context);
       if (operation === "import") {
-        await openImportConfirmation(page);
-        findButton(page, "import-confirm")!.click();
-        await waitForButton(page, "import-confirm", true);
+        await openImport(page);
+        button(page, "import-confirm")!.click();
+        await ready(page, "import-confirm", true);
       } else {
-        await waitForButton(page, "backfill-apply", false);
-        findButton(page, "backfill-apply")!.click();
-        await waitForButton(page, "backfill-apply", true);
+        await ready(page, "backfill-apply", false);
+        button(page, "backfill-apply")!.click();
+        await ready(page, "backfill-apply", true);
       }
 
       context.agentSelection.state.selectedId = "writer";
       context.notify();
-      await waitForMemoryImport(() => {
+      await settle(() => {
         expect(page.textContent).toContain("/tmp/openclaw-writer");
         expect(page.textContent).not.toContain("/tmp/openclaw-research");
-        expect(findButton(page, "import-confirm")).toBeNull();
+        expect(button(page, "import-confirm")).toBeNull();
       });
-      await waitForButton(page, "import-provider-button", false);
-      pending.resolve(
-        operation === "import"
-          ? createApplyResult()
-          : {
-              days: 0,
-              candidates: 0,
-              staged: 0,
-              perDay: [],
-              cursor: { advanced: false, exhausted: true, hasMore: false },
-            },
-      );
+      await ready(page, "import-provider-button", false);
+      pending.resolve(operation === "import" ? createApplyResult() : backfillChunk());
       await pending.promise;
       flush();
       expect(page.textContent).toContain("/tmp/openclaw-writer");
@@ -737,15 +716,12 @@ describe("MemoryImportPage", () => {
       }),
     });
     const page = await mountPage(createContext(request));
-    await waitForButton(page, "backfill-preview");
-    const dates = page.querySelectorAll<HTMLInputElement>(
-      ".memory-import__backfill-dates input[type='date']",
-    );
-    setDate(dates[0]!, "2026-07-01");
-    setDate(dates[1]!, "2026-07-31");
-    findButton(page, "backfill-preview")?.click();
+    await ready(page, "backfill-preview");
+    setDate(date(page)!);
+    setDate(date(page, 1)!, "2026-07-31");
+    button(page, "backfill-preview")?.click();
 
-    await waitForMemoryImport(() => expect(page.textContent).toContain("First memory"));
+    await textAppears(page, "First memory");
     expect(page.textContent).toContain("preview shows the first bounded batch");
     expect(request.mock.calls.at(-1)).toEqual([
       "memory.sessionBackfill.preview",
@@ -754,56 +730,27 @@ describe("MemoryImportPage", () => {
   });
 
   it("applies backfill chunks until a call returns zero new candidates", async () => {
-    let applyCalls = 0;
+    const apply = vi
+      .fn()
+      .mockReturnValue(backfillChunk())
+      .mockReturnValueOnce(backfillChunk(2, 3, 2, true))
+      .mockReturnValueOnce(backfillChunk(1, 1, 1));
     const request = createRequest({
       "migrations.memory.plan": () => createPlan(),
-      "memory.sessionBackfill.apply": () => {
-        applyCalls += 1;
-        if (applyCalls === 1) {
-          return {
-            days: 2,
-            candidates: 3,
-            staged: 2,
-            perDay: [{ day: "2026-07-01", candidateCount: 3, sample: [] }],
-            cursor: { advanced: true, exhausted: false, hasMore: true },
-          };
-        }
-        if (applyCalls === 2) {
-          return {
-            days: 1,
-            candidates: 1,
-            staged: 1,
-            perDay: [{ day: "2026-07-01", candidateCount: 1, sample: [] }],
-            cursor: { advanced: true, exhausted: false, hasMore: false },
-          };
-        }
-        return {
-          days: 0,
-          candidates: 0,
-          staged: 0,
-          perDay: [],
-          cursor: { advanced: false, exhausted: true, hasMore: false },
-        };
-      },
+      "memory.sessionBackfill.apply": apply,
     });
     const page = await mountPage(createContext(request));
-    await waitForButton(page, "backfill-apply");
-    findButton(page, "backfill-apply")?.click();
+    await ready(page, "backfill-apply");
+    button(page, "backfill-apply")?.click();
 
-    await waitForMemoryImport(() =>
+    await settle(() =>
       expect(page.textContent).toContain("3 staged; promotion happens via dreaming"),
     );
-    expect(applyCalls).toBe(3);
+    expect(apply).toHaveBeenCalledTimes(3);
     expect(page.textContent).toContain("4 session candidates processed");
     expect(page.textContent).toContain("1 day processed");
 
-    const from = page.querySelector<HTMLInputElement>(
-      ".memory-import__backfill-dates input[type='date']",
-    );
-    if (!from) {
-      throw new Error("expected backfill from-date input");
-    }
-    setDate(from, "2026-07-01");
+    setDate(date(page)!);
     flush();
     expect(page.textContent).not.toContain("3 staged; promotion happens via dreaming");
   });
@@ -816,12 +763,12 @@ describe("MemoryImportPage", () => {
       },
     });
     const page = await mountPage(createContext(request));
-    await waitForButton(page, "backfill-rollback");
-    findButton(page, "backfill-rollback")?.click();
-    await waitForButton(page, "backfill-rollback-confirm");
-    findButton(page, "backfill-rollback-confirm")?.click();
+    await ready(page, "backfill-rollback");
+    button(page, "backfill-rollback")?.click();
+    await ready(page, "backfill-rollback-confirm");
+    button(page, "backfill-rollback-confirm")?.click();
 
-    await waitForMemoryImport(() => expect(page.textContent).toContain("rollback unavailable"));
+    await textAppears(page, "rollback unavailable");
     expect(request.mock.calls.at(-1)).toEqual([
       "memory.sessionBackfill.rollback",
       { agentId: "research" },
