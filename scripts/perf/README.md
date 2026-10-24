@@ -162,6 +162,29 @@ heap snapshot analyzer for retained-size attribution. All fixtures and mock
 provider responses are synthetic; this workload does not reproduce a private
 production plugin configuration or measure provider-network latency.
 
+### Summary identity strings
+
+`session-summary-id-retention.ts` prepares 10,000 synthetic sessions with observer
+digests and restart-recovery sources, 8,000 settled runs, 2,000 archived sessions,
+and 40 synthetic plugins. Capture pages through the real roster, completes ten
+mock-provider turns across five dashboards, applies label churn, then requests a
+main-isolate heap snapshot from the built Gateway. Use fresh state for each side:
+
+```sh
+node --import ./scripts/tsx.mjs scripts/perf/session-summary-id-retention.ts \
+  --prepare --state-dir /path/to/new-summary-fixture
+node --import ./scripts/tsx.mjs scripts/perf/session-summary-id-retention.ts \
+  --capture --state-dir /path/to/new-summary-fixture --output /path/to/new-capture
+```
+
+Build the selected revision first. Both commands accept matching `--port` and
+`--mock-port` values (defaults 41697 and 41698, loopback only); capture accepts
+`--entry` for its built JavaScript entry. Analyze the path in `capture.json` with
+`scripts/heap-snapshot-diff.mjs --summary`. Compare physical duplicate-string
+nodes/bytes and family populations under identical churn; JavaScript equality
+does not prove string sharing. Forced-GC snapshots establish retention, not CPU,
+GC-throughput, or production-wide savings. Keep snapshots local and synthetic.
+
 ## Released session authority
 
 ### Pending-input timer retention

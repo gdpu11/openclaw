@@ -4,6 +4,7 @@ import { expect, it } from "vitest";
 import { cloneEnvWithPlatformSemantics } from "../config-env-vars.js";
 import { createSessionHistoryWorkerReaders } from "./session-transcript-worker-readers.js";
 import { createSessionHistoryWorkerRequestStub } from "./session-transcript-worker-readers.test-support.js";
+import type { InternalSessionEntry } from "./types.js";
 
 const storageStateDir = path.resolve("synthetic-worker-state");
 const storagePath = path.join(storageStateDir, "agents", "main", "agent.sqlite");
@@ -13,6 +14,87 @@ const storageEnv = new Proxy(
 );
 type Readers = ReturnType<typeof createSessionHistoryWorkerReaders>;
 const storageInput = { env: storageEnv };
+
+it.each(["matching", "stale", "legacy"] as const)(
+  "preserves %s summary evidence when adopting worker entries",
+  async (kind) => {
+    const sessionKey = "agent:main:synthetic-summary";
+    const entry: InternalSessionEntry = {
+      sessionId: "synthetic-session",
+      lifecycleRevision: "synthetic-lifecycle",
+      updatedAt: 1,
+      lastRunId: "synthetic-run",
+      observerDigest: {
+        sessionKey,
+        sessionId: "synthetic-session",
+        lifecycleRevision: "synthetic-lifecycle",
+        agentId: "main",
+        runId: "synthetic-run",
+        revision: 1,
+        updatedAt: 1,
+        headline: "Finished",
+        health: "done",
+      },
+      restartRecoveryOperatorSource: {
+        version: 1,
+        agentId: "main",
+        sessionKey,
+        sessionId: "synthetic-session",
+        lifecycleRevision: "synthetic-lifecycle",
+        sourceRunId: "synthetic-run",
+        snapshot: {
+          profileId: "synthetic-profile",
+          scopes: ["operator.read"],
+          assignedRole: null,
+          githubLogin: null,
+          grant: null,
+          aliasBindingIds: [],
+          authPolicy: {
+            generation: "",
+            grantGeneration: "synthetic-grant",
+            role: "operator",
+            authMethod: "token",
+          },
+          controlUiAdmin: false,
+          localOperator: true,
+          sourceIngress: "internal",
+        },
+      },
+    };
+    if (kind === "stale") {
+      Object.assign(entry.restartRecoveryOperatorSource!, {
+        sessionKey: "agent:other:previous",
+        sessionId: "previous-session",
+        lifecycleRevision: "previous-lifecycle",
+        sourceRunId: "previous-run",
+        agentId: "other",
+      });
+      Object.assign(entry.observerDigest!, {
+        sessionId: "previous-session",
+        lifecycleRevision: "previous-lifecycle",
+      });
+    } else if (kind === "legacy") {
+      delete entry.observerDigest!.sessionId;
+      delete entry.observerDigest!.lifecycleRevision;
+      delete entry.observerDigest!.runId;
+      delete entry.observerDigest!.agentId;
+      delete entry.restartRecoveryOperatorSource!.lifecycleRevision;
+    }
+    const expected = structuredClone(entry);
+    const readers = createSessionHistoryWorkerReaders(
+      createSessionHistoryWorkerRequestStub(async () => ({
+        kind: "session-exact-entries",
+        entries: structuredClone([{ sessionKey, entry }]),
+        lifecycleTimestamps: {},
+      })),
+    );
+    const result = await readers.readExactEntries({ env: {}, sessionKeys: [sessionKey] });
+    expect(result.entries).toStrictEqual([{ sessionKey, entry: expected }]);
+    result.entries[0]!.entry.observerDigest!.headline = "Changed by caller";
+    expect(entry).toStrictEqual(expected);
+  },
+);
+
 const session = { ...storageInput, sessionId: "one" };
 // One direct reader covers the shared factory; keep both custom eviction preparers.
 const storageRequests: Array<[string, (readers: Readers) => Promise<unknown>]> = [
