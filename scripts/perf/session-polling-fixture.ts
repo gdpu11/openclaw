@@ -51,29 +51,32 @@ try {
   }
   for (let offset = 0; offset < sessions; offset += 100) {
     for (const [agentIndex, agentId] of agents.entries()) {
-      agentDb.runOpenClawAgentWriteTransaction((database) => {
-        for (let index = offset; index < Math.min(offset + 100, sessions); index++) {
-          if (index % agents.length !== agentIndex) {
-            continue;
+      agentDb.runOpenClawAgentWriteTransaction(
+        (database) => {
+          for (let index = offset; index < Math.min(offset + 100, sessions); index++) {
+            if (index % agents.length !== agentIndex) {
+              continue;
+            }
+            const sessionId = `polling-${index}`;
+            const sessionKey = `agent:${agentId}:${sessionId}`;
+            writeSessionEntry(database, sessionKey, {
+              sessionId,
+              updatedAt: now,
+              lifecycleRevision: `polling-${index}`,
+              ...(index < bound
+                ? {
+                    worktree: {
+                      id: `missing-${index}`,
+                      branch: `fixture-${index}`,
+                      repoRoot: path.join(stateDir, "synthetic-repository"),
+                    },
+                  }
+                : {}),
+            });
           }
-          const sessionId = `polling-${index}`;
-          const sessionKey = `agent:${agentId}:${sessionId}`;
-          writeSessionEntry(database, sessionKey, {
-            sessionId,
-            updatedAt: now,
-            lifecycleRevision: `polling-${index}`,
-            ...(index < bound
-              ? {
-                  worktree: {
-                    id: `missing-${index}`,
-                    branch: `fixture-${index}`,
-                    repoRoot: path.join(stateDir, "synthetic-repository"),
-                  },
-                }
-              : {}),
-          });
-        }
-      }, { agentId });
+        },
+        { agentId },
+      );
     }
   }
   stateDb.runOpenClawStateWriteTransaction(({ db }) => {
