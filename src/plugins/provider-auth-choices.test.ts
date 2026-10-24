@@ -1,29 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const pluginRegistryMocks = vi.hoisted(() => ({
-  loadPluginManifestRegistryForInstalledIndex: vi.fn(),
-  loadPluginManifestRegistryForPluginRegistry: vi.fn(),
-  loadPluginRegistrySnapshot: vi.fn(() => ({ plugins: [] })),
-  loadPluginMetadataSnapshot: vi.fn(),
   resolvePluginMetadataSnapshot: vi.fn(),
 }));
 const officialCatalogMocks = vi.hoisted(() => ({
   listOfficialExternalProviderCatalogEntries: vi.fn(),
 }));
 
-vi.mock("./manifest-registry-installed.js", () => ({
-  loadPluginManifestRegistryForInstalledIndex:
-    pluginRegistryMocks.loadPluginManifestRegistryForInstalledIndex,
-}));
-
-vi.mock("./plugin-registry.js", () => ({
-  loadPluginManifestRegistryForPluginRegistry:
-    pluginRegistryMocks.loadPluginManifestRegistryForPluginRegistry,
-  loadPluginRegistrySnapshot: pluginRegistryMocks.loadPluginRegistrySnapshot,
-}));
-
 vi.mock("./plugin-metadata-snapshot.js", () => ({
-  loadPluginMetadataSnapshot: pluginRegistryMocks.loadPluginMetadataSnapshot,
   resolvePluginMetadataSnapshot: pluginRegistryMocks.resolvePluginMetadataSnapshot,
 }));
 
@@ -42,7 +26,6 @@ const {
   resolveManifestProviderAuthChoices: resolveChoices,
   resolveProviderOnboardAuthFlags: authFlags,
 } = await import("./provider-auth-choices.js");
-const { clearPluginMetadataLifecycleCaches } = await import("./plugin-metadata-lifecycle.js");
 
 const openaiChoiceMetadata = choiceMetadata("openai", "OpenAI");
 
@@ -113,16 +96,10 @@ function loginPlugin(
 }
 
 function setPlugins(plugins: Array<Record<string, unknown>>) {
-  pluginRegistryMocks.loadPluginManifestRegistryForInstalledIndex.mockReturnValue({ plugins });
-  pluginRegistryMocks.loadPluginManifestRegistryForPluginRegistry.mockReturnValue({ plugins });
-  pluginRegistryMocks.loadPluginMetadataSnapshot.mockReturnValue({
+  pluginRegistryMocks.resolvePluginMetadataSnapshot.mockReturnValue({
     plugins,
     manifestRegistry: { plugins },
   });
-  pluginRegistryMocks.resolvePluginMetadataSnapshot.mockImplementation(
-    (params?: { pluginMetadataSnapshot?: unknown }) =>
-      params?.pluginMetadataSnapshot ?? pluginRegistryMocks.loadPluginMetadataSnapshot(params),
-  );
 }
 
 function setChoices(pluginId: string, providerAuthChoices: Array<Record<string, unknown>>) {
@@ -154,14 +131,9 @@ describe("provider auth choice manifest helpers", () => {
   afterEach(() => vi.restoreAllMocks());
 
   beforeEach(() => {
-    for (const mock of Object.values(pluginRegistryMocks)) {
-      mock.mockReset();
-    }
-    pluginRegistryMocks.loadPluginRegistrySnapshot.mockReturnValue({ plugins: [] });
     setPlugins([]);
     officialCatalogMocks.listOfficialExternalProviderCatalogEntries.mockReset();
     officialCatalogMocks.listOfficialExternalProviderCatalogEntries.mockReturnValue([]);
-    clearPluginMetadataLifecycleCaches();
   });
 
   it("preserves public metadata shape and shallow aliases across every choice reader", () => {
@@ -327,51 +299,24 @@ describe("provider auth choice manifest helpers", () => {
     expect(declaredChoices({ config })).toEqual([]);
   });
 
-  it("keeps installed manifest flags ahead of official cold-install flags", () => {
-    setChoices("cerebras", [
-      keyChoice("cerebras", "Cerebras", { cliDescription: "Installed Cerebras key" }),
-    ]);
+  it("deduplicates installed flags before adding eligible cold-install flags", () => {
+    const installed = keyChoice("cerebras", "Cerebras", {
+      cliDescription: "Installed Cerebras key",
+    });
+    setChoices("cerebras", [installed, { ...installed, method: "other", choiceId: "other-key" }]);
+    const authChoices = [
+      keyChoice("cerebras", "Cerebras", { cliDescription: "Catalog Cerebras key" }),
+      keyChoice("groq", "Groq"),
+      keyChoice("unavailable", "Unavailable", { platforms: [] }),
+    ];
     officialCatalogMocks.listOfficialExternalProviderCatalogEntries.mockReturnValue([
-      {
-        openclaw: {
-          plugin: { id: "cerebras" },
-          providers: [
-            {
-              id: "cerebras",
-              authChoices: [
-                keyChoice("cerebras", "Cerebras", { cliDescription: "Catalog Cerebras key" }),
-                keyChoice("groq", "Groq"),
-                {
-                  method: "local",
-                  choiceId: "unavailable-local",
-                  platforms: [],
-                  optionKey: "unavailableLocal",
-                  cliFlag: "--unavailable-local",
-                  cliOption: "--unavailable-local",
-                },
-              ],
-            },
-          ],
-        },
-      },
+      { openclaw: { providers: [{ authChoices }] } },
     ]);
 
     expect(authFlags()).toEqual([
       expectedFlag("cerebras", "Installed Cerebras key"),
       expectedFlag("groq", "Groq API key"),
     ]);
-  });
-
-  it("deduplicates flag metadata by option key + flag", () => {
-    setChoices("moonshot", [
-      keyChoice("moonshot", "Moonshot", { choiceLabel: "Kimi API key (.ai)" }),
-      keyChoice("moonshot", "Moonshot", {
-        method: "api-key-cn",
-        choiceId: "moonshot-api-key-cn",
-        choiceLabel: "Kimi API key (.cn)",
-      }),
-    ]);
-    expect(authFlags()).toEqual([expectedFlag("moonshot", "Moonshot API key")]);
   });
 
   it("can exclude untrusted workspace plugin auth choices during onboarding resolution", () => {
@@ -384,11 +329,7 @@ describe("provider auth choice manifest helpers", () => {
     setPlugins([
       loginPlugin("openai", "bundled", "openai", guided),
       loginPlugin("evil-openai-hijack", "workspace", "evil-openai", {}, [
-        {
-          ...authMethod("evil-openai", "api-key"),
-          ...choiceMetadata("evil-openai", "Evil OpenAI"),
-          optionKey: "evilOpenaiApiKey",
-        },
+        keyChoice("evil-openai", "Evil OpenAI", { optionKey: "evilOpenaiApiKey" }),
       ]),
     ]);
 

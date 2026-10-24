@@ -30,9 +30,7 @@ function writeJson(filePath: string, data: unknown) {
   fs.writeFileSync(filePath, JSON.stringify(data), "utf8");
 }
 
-beforeEach(() => {
-  clearPluginMetadataLifecycleCaches();
-});
+beforeEach(clearPluginMetadataLifecycleCaches);
 
 afterEach(async () => {
   clearPluginMetadataLifecycleCaches();
@@ -86,23 +84,17 @@ function createIndex(
   record: Partial<InstalledPluginIndex["plugins"][number]> = {},
 ): InstalledPluginIndex {
   const index = makePluginMetadataIndex(pluginId);
-  Object.assign(
-    expectDefined(index.plugins[0], "fixture plugin"),
-    record.rootDir
-      ? {
-          manifestPath: path.join(record.rootDir, "openclaw.plugin.json"),
-          source: path.join(record.rootDir, "index.ts"),
-        }
-      : {},
-    record,
-  );
-  return {
-    ...index,
+  const plugin = Object.assign(expectDefined(index.plugins[0], "fixture plugin"), record);
+  if (record.rootDir) {
+    plugin.manifestPath = path.join(record.rootDir, "openclaw.plugin.json");
+    plugin.source = path.join(record.rootDir, "index.ts");
+  }
+  return Object.assign(index, {
     hostContractVersion: "2026.4.25",
     compatRegistryVersion: "compat-v1",
     policyHash: "policy-v1",
     ...overrides,
-  };
+  });
 }
 
 function candidateFixture(
@@ -136,7 +128,21 @@ function profileFixture(pluginId = "demo") {
   };
   const pluginRoot = addPlugin(pluginId);
   const env = hermeticEnv({ OPENCLAW_CONFIG_PATH: path.join(configDir, "openclaw.json") });
-  return { stateDir, extensionsDir, pluginRoot, env, addPlugin };
+  const load = (config?: OpenClawConfig) =>
+    loadPluginRegistrySnapshotWithMetadata({ stateDir, env, config });
+  return {
+    env,
+    extensionsDir,
+    pluginRoot,
+    addPlugin,
+    load,
+    persist: async (config?: OpenClawConfig) => {
+      const result = load(config);
+      await writePersistedInstalledPluginIndex(result.snapshot, { stateDir });
+      clearPluginMetadataLifecycleCaches();
+      return result;
+    },
+  };
 }
 
 function deriveRegistry(
@@ -452,63 +458,51 @@ describe("plugin registry facade", () => {
   });
 
   it("projects a config policy change over the persisted inventory without rescanning", async () => {
-    const { stateDir, extensionsDir, env } = profileFixture();
+    const { env, extensionsDir, load, persist } = profileFixture();
     // Bundled plugins are disabled here, so the default memory slot owner is absent.
     const enabled: OpenClawConfig = { plugins: { slots: { memory: "none" } } };
-    const installed = loadPluginRegistrySnapshotWithMetadata({ stateDir, env, config: enabled });
+    const installed = await persist(enabled);
     expect(installed.snapshot.plugins.map((plugin) => [plugin.pluginId, plugin.enabled])).toEqual([
       ["demo", true],
     ]);
-    await writePersistedInstalledPluginIndex(installed.snapshot, { stateDir });
-    clearPluginMetadataLifecycleCaches();
-
     const disabled: OpenClawConfig = {
       plugins: { slots: { memory: "none" }, entries: { demo: { enabled: false } } },
     };
     const readdir = vi.spyOn(fs, "readdirSync");
-    try {
-      const result = loadPluginRegistrySnapshotWithMetadata({ stateDir, env, config: disabled });
-      // Discovery lists the extensions root; freshness checks may still read plugin dirs.
-      expect(readdir.mock.calls.filter(([dir]) => String(dir) === extensionsDir)).toEqual([]);
-      expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual([
-        "persisted-registry-stale-policy",
-      ]);
-      expect(result.snapshot.policyHash).toBe(resolveInstalledPluginIndexPolicyHash(disabled, env));
-      expect(result.snapshot.plugins.map((plugin) => [plugin.pluginId, plugin.enabled])).toEqual([
-        ["demo", false],
-      ]);
-    } finally {
-      readdir.mockRestore();
-    }
+    const result = load(disabled);
+    // Discovery lists the extensions root; freshness checks may still read plugin dirs.
+    expect(readdir.mock.calls.filter(([dir]) => String(dir) === extensionsDir)).toEqual([]);
+    expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual([
+      "persisted-registry-stale-policy",
+    ]);
+    expect(result.snapshot.policyHash).toBe(resolveInstalledPluginIndexPolicyHash(disabled, env));
+    expect(result.snapshot.plugins.map((plugin) => [plugin.pluginId, plugin.enabled])).toEqual([
+      ["demo", false],
+    ]);
   });
 
   it("rediscovers when a policy enables a persisted plugin whose files are gone", async () => {
-    const { stateDir, pluginRoot, env } = profileFixture();
+    const { pluginRoot, load, persist } = profileFixture();
     const disabled: OpenClawConfig = {
       plugins: { slots: { memory: "none" }, entries: { demo: { enabled: false } } },
     };
-    const installed = loadPluginRegistrySnapshotWithMetadata({ stateDir, env, config: disabled });
-    await writePersistedInstalledPluginIndex(installed.snapshot, { stateDir });
+    await persist(disabled);
     // Freshness tolerates missing files only while the persisted record is disabled.
     fs.rmSync(pluginRoot, { recursive: true, force: true });
     clearPluginMetadataLifecycleCaches();
 
-    const result = loadPluginRegistrySnapshotWithMetadata({
-      stateDir,
-      env,
-      config: { plugins: { slots: { memory: "none" } } },
-    });
+    const result = load({ plugins: { slots: { memory: "none" } } });
 
     expect(result.source).toBe("derived");
     expect(result.snapshot.plugins.filter((plugin) => plugin.enabled)).toEqual([]);
   });
 
   it("reloads profile extensions after the metadata lifecycle is cleared", () => {
-    const { stateDir, env, addPlugin } = profileFixture("first");
-    const first = loadPluginRegistrySnapshotWithMetadata({ stateDir, env });
+    const { load, addPlugin } = profileFixture("first");
+    const first = load();
     addPlugin("second");
     clearPluginMetadataLifecycleCaches();
-    const second = loadPluginRegistrySnapshotWithMetadata({ stateDir, env });
+    const second = load();
 
     expect(first.source).toBe("derived");
     expect(second.source).toBe("derived");

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { observeSqliteReadSql } from "../../test/helpers/sqlite-statement-execution-counter.js";
 import {
@@ -55,6 +56,7 @@ import {
 
 const tempDirs: string[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   clearPluginMetadataLifecycleCaches();
   await closeOpenClawStateDatabaseAsync();
   closeOpenClawStateDatabaseForTest();
@@ -77,62 +79,55 @@ function expectPluginIds(index: InstalledPluginIndex, expected: string[]) {
   expect(index.plugins.map((plugin) => plugin.pluginId)).toEqual(expected);
 }
 
-function dropStartupConfigPaths(
-  plugin: InstalledPluginIndex["plugins"][number],
-): InstalledPluginIndex["plugins"][number] {
-  return {
-    ...plugin,
-    startup: {
-      sidecar: plugin.startup.sidecar,
-      memory: plugin.startup.memory,
-      agentHarnesses: plugin.startup.agentHarnesses,
-    },
-  };
-}
-
-function makePluginFixture(configPaths?: readonly string[]) {
+function makePluginFixture(configPaths?: readonly string[], overrides: NodeJS.ProcessEnv = {}) {
   const stateDir = makeTempDir();
   const pluginDir = path.join(stateDir, "plugins", "demo");
   fs.mkdirSync(pluginDir, { recursive: true });
   const candidate = createCandidate(pluginDir, { configPaths });
+  const env = { ...discoveryEnv, ...overrides };
+  const params = { stateDir, candidates: [candidate], env };
   return {
-    ...indexStoreFixture(stateDir, discoveryEnv),
+    ...indexStoreFixture(stateDir, env),
     pluginDir,
-    params: { stateDir, candidates: [candidate], env: discoveryEnv },
+    params,
+    refresh: (options: Partial<Parameters<typeof refreshIndex>[0]> = {}) =>
+      refreshIndex({ reason: "manual", ...params, ...options }),
   };
+}
+
+function withDatabase<T>(filePath: string, run: (db: DatabaseSync) => T, readOnly = false) {
+  const { DatabaseSync } = requireNodeSqlite();
+  const db = new DatabaseSync(filePath, { readOnly });
+  try {
+    return run(db);
+  } finally {
+    db.close();
+  }
 }
 
 describe("installed plugin index persistence", () => {
   it.each(["write", "rollback"] as const)(
     "keeps the running Gateway inventory after an installed-index %s",
     async (operation) => {
-      const stateDir = makeTempDir();
-      const pluginDir = path.join(stateDir, "demo");
-      fs.mkdirSync(pluginDir);
-      const env = { OPENCLAW_STATE_DIR: stateDir, OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1" };
+      const f = makePluginFixture(undefined, { OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1" });
+      const { stateDir, env } = f;
       const config = {};
-      const index = await refreshIndex({
-        reason: "manual",
-        stateDir,
-        candidates: [createCandidate(pluginDir)],
-        config,
-        env,
-      });
+      const index = await f.refresh({ config });
       const boot = loadPluginMetadataSnapshot({ index, config, env, allowCurrent: false });
       setGatewayPluginMetadataSnapshot(boot, { config, env });
       expect(getCurrentPluginMetadataSnapshot({ config, env })).toBe(boot);
       const next = { ...index, plugins: [] };
 
       if (operation === "rollback") {
-        const revision = indexStoreFixture(stateDir).revision();
+        const revision = f.revision();
         await expect(
           withLease({ env }, (lease) => restoreIndex(next, revision, { stateDir, lease })),
         ).resolves.toBe(true);
       } else {
-        await writeIndex(next, { stateDir });
+        await f.write(next);
       }
 
-      expectPluginIds(requirePersisted(await readIndex({ stateDir })), []);
+      expectPluginIds(requirePersisted(await f.read()), []);
       expect(getCurrentPluginMetadataSnapshot({ config, env })).toBe(boot);
       expectPluginIds(boot.index, ["demo"]);
     },
@@ -150,8 +145,9 @@ describe("installed plugin index persistence", () => {
 
     await writeIndex(index, { stateDir });
 
-    const persisted = requirePersisted(await readIndex({ stateDir }));
-    expect(persisted.plugins[0]?.contextEngineIds).toEqual(["canonical-engine"]);
+    expect((await readIndex({ stateDir }))?.plugins[0]?.contextEngineIds).toEqual([
+      "canonical-engine",
+    ]);
     expect((await readRecords({ stateDir }))?.demo?.contextEngineIdsByPlugin).toEqual(ownership);
   });
 
@@ -237,11 +233,11 @@ describe("installed plugin index persistence", () => {
   });
 
   it("persists resolved doctor contract hashes and signatures", async () => {
-    const { stateDir, pluginDir, params } = makePluginFixture();
+    const { stateDir, pluginDir, refresh } = makePluginFixture();
     const contractPath = path.join(pluginDir, "doctor-contract-api.ts");
     fs.writeFileSync(contractPath, "export const legacyConfigRules = [];\n", "utf8");
 
-    const first = await refreshIndex({ reason: "manual", ...params });
+    const first = await refresh();
     const firstPlugin = first.plugins[0];
     const firstHash = firstPlugin?.doctorContractHash;
     const firstFile = firstPlugin?.doctorContractFile;
@@ -257,7 +253,7 @@ describe("installed plugin index persistence", () => {
       doctorContractFile: firstFile,
     });
     fs.appendFileSync(contractPath, "// changed contract\n");
-    const changed = await refreshIndex({ reason: "manual", ...params });
+    const changed = await refresh();
     const changedPlugin = requirePersisted(changed).plugins[0]!;
     expect(changedPlugin.manifestHash).toBe(firstPlugin?.manifestHash);
     expect(changedPlugin.doctorContractHash).toMatch(/^[a-f0-9]{64}$/u);
@@ -276,25 +272,20 @@ describe("installed plugin index persistence", () => {
     await writeIndex(createIndex(), { stateDir });
     await closeOpenClawStateDatabaseAsync();
 
-    const sqlite = requireNodeSqlite();
-    const mutate = new sqlite.DatabaseSync(filePath);
-    mutate.exec("DROP INDEX idx_operator_approvals_resolution_ref;");
-    mutate.close();
-
-    const expectCanonicalIndexMissing = () => {
-      const verify = new sqlite.DatabaseSync(filePath, { readOnly: true });
-      try {
-        expect(
-          verify
-            .prepare(
-              "SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = 'idx_operator_approvals_resolution_ref'",
-            )
-            .get(),
-        ).toBeUndefined();
-      } finally {
-        verify.close();
-      }
-    };
+    const indexName = "idx_operator_approvals_resolution_ref";
+    withDatabase(filePath, (db) => db.exec(`DROP INDEX ${indexName};`));
+    const expectCanonicalIndexMissing = () =>
+      withDatabase(
+        filePath,
+        (db) => {
+          expect(
+            db
+              .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = ?")
+              .get(indexName),
+          ).toBeUndefined();
+        },
+        true,
+      );
 
     await expect(readIndex({ stateDir })).resolves.toMatchObject({
       version: 1,
@@ -306,11 +297,14 @@ describe("installed plugin index persistence", () => {
   });
 
   it("marks legacy config-path startup indexes stale so update rebuilds them", async () => {
-    const { stateDir, params } = makePluginFixture(["browser"]);
-    const current = await refreshIndex({ reason: "manual", ...params });
+    const { stateDir, params, refresh } = makePluginFixture(["browser"]);
+    const current = await refresh();
     const legacy = {
       ...current,
-      plugins: current.plugins.map(dropStartupConfigPaths),
+      plugins: current.plugins.map((plugin) => {
+        const { configPaths: _configPaths, ...startup } = plugin.startup;
+        return { ...plugin, startup };
+      }),
     };
     expect(invalidationReasons(legacy, current)).toEqual(["migration"]);
     await writeIndex(legacy, { stateDir });
@@ -318,7 +312,7 @@ describe("installed plugin index persistence", () => {
     const inspection = loadRegistry(params);
     expect(inspection.source).toBe("derived");
 
-    const refreshed = await refreshIndex({ reason: "policy-changed", ...params });
+    const refreshed = await refresh({ reason: "policy-changed" });
     expect(refreshed.plugins[0]?.startup.configPaths).toEqual(["browser"]);
     const persisted = requirePersisted(await readIndex({ stateDir }));
     expect(persisted.plugins[0]?.startup.configPaths).toEqual(["browser"]);
@@ -338,8 +332,10 @@ describe("installed plugin index persistence", () => {
     await expect(writeIndex(createIndex(), { stateDir })).rejects.toThrow(
       "Persisted plugin install records are invalid",
     );
-    const row = readStateRow(storePath({ stateDir }));
-    expect(row).toEqual({ value_json: persistedValueJson, updated_at_ms: 123 });
+    expect(readIndexRow(storePath({ stateDir }))).toMatchObject({
+      value_json: persistedValueJson,
+      updated_at_ms: 123,
+    });
   });
 
   it("preserves newer shared-state schema errors while reading the index", async () => {
@@ -349,10 +345,9 @@ describe("installed plugin index persistence", () => {
     const databasePath = storePath({ stateDir });
     fs.renameSync(databasePath, `${databasePath}.template`);
     fs.copyFileSync(`${databasePath}.template`, databasePath, fs.constants.COPYFILE_EXCL);
-    const { DatabaseSync } = requireNodeSqlite();
-    const database = new DatabaseSync(databasePath);
-    database.exec(`PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION + 1};`);
-    database.close();
+    withDatabase(databasePath, (db) =>
+      db.exec(`PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION + 1};`),
+    );
     const schemaError = {
       name: "SqliteSchemaVersionError",
       message: expect.stringContaining(
@@ -374,7 +369,6 @@ describe("installed plugin index persistence", () => {
 });
 
 describe("installed plugin index install-record persistence", () => {
-  afterEach(() => vi.restoreAllMocks());
   it.each(["records-first", "index-first"] as const)(
     "reads one row for independent projections of an invalid index: %s",
     async (order) => {
@@ -404,12 +398,12 @@ describe("installed plugin index install-record persistence", () => {
         const assertRecords = async () => expect(await readRecords({ stateDir })).toEqual(records);
         const assertIndex = () => expect(readIndexSync({ stateDir })).toBeNull();
 
-        if (order === "records-first") {
-          await assertRecords();
-          assertIndex();
-        } else {
-          assertIndex();
-          await assertRecords();
+        const readers = [assertRecords, assertIndex];
+        if (order === "index-first") {
+          readers.reverse();
+        }
+        for (const read of readers) {
+          await read();
         }
 
         expect(installedIndexReads + workerRead.mock.calls.length).toBe(1);
@@ -456,15 +450,7 @@ function insertPersistedIndexRow(stateDir: string, valueJson: string): void {
   );
 }
 
-function readStateRow(filePath: string) {
-  const row = readIndexRow(filePath);
-  assert(row);
-  const { value_json, updated_at_ms } = row;
-  return { value_json, updated_at_ms };
-}
-
 describe("installed plugin index read state", () => {
-  afterEach(() => vi.restoreAllMocks());
   it("preserves the original read error through both full-index readers", async () => {
     const stateDir = makeTempDir();
     const error = readError();
@@ -487,14 +473,13 @@ describe("installed plugin index read state", () => {
     const filePath = storePath({ stateDir });
     if (missing !== "database") {
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
-      const { DatabaseSync } = requireNodeSqlite();
-      const db = new DatabaseSync(filePath);
-      if (missing === "row") {
-        db.exec(
-          "CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL) STRICT",
-        );
-      }
-      db.close();
+      withDatabase(filePath, (db) => {
+        if (missing === "row") {
+          db.exec(
+            "CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL) STRICT",
+          );
+        }
+      });
     }
     const before = missing === "database" ? undefined : fs.readFileSync(filePath);
     await expectRecordState(stateDir, "missing", null);
@@ -528,11 +513,13 @@ describe("installed plugin index read state", () => {
       });
     await expect.soft(Promise.resolve().then(refresh)).rejects.toBe(error);
     expect.soft(lease.assertOwnedInTransaction).not.toHaveBeenCalled();
-    expect.soft(readStateRow(filePath)).toEqual({ value_json: valueJson, updated_at_ms: 123 });
+    expect
+      .soft(readIndexRow(filePath))
+      .toMatchObject({ value_json: valueJson, updated_at_ms: 123 });
     readSpy.mockRestore();
     refresh();
     expect((await readIndex({ stateDir }))?.installRecords).toEqual(installRecords);
-    expect(JSON.parse(readStateRow(filePath).value_json).revision).toBeGreaterThan(123);
+    expect(JSON.parse(readIndexRow(filePath)!.value_json).revision).toBeGreaterThan(123);
   });
 
   it.each([
