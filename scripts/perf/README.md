@@ -4654,6 +4654,26 @@ sealed history should remain at zero warm hash bytes, and mutable SDK content
 must still be inspected. Diagnostic output and in-place mutation coverage live
 in `prompt-cache-observability.history.test.ts`.
 
+`prompt-cache-observation-measure.ts` measures the complete observation boundary:
+append-shaped frozen messages → `cloneTranscriptView` → `convertToLlm` →
+`onModelRequest`, including real worker preparation. It keeps 16 synthetic sessions
+of 128 messages resident across 20 repeated requests per session. `--hydration clone`
+replays the former structured-clone behavior; the default `shared` uses current
+hydration. Run separate baseline/candidate processes with the same fixtures.
+
+```sh
+node --expose-gc --import ./scripts/tsx.mjs scripts/perf/prompt-cache-observation-measure.ts
+```
+
+`--sessions`, `--messages`, and `--rounds` control the workload. Results separate
+first-request and repeated-request retained heap, cold/warm observation CPU, and
+natural GC entries. Hydration itself is outside observation CPU timing; retained
+bytes per call divide resident diagnostic state by the reported call count, not
+allocation turnover. `--measure allocation --output <profile.json>` includes
+collected objects; `--measure snapshot --output <prefix>` writes before, first,
+and final snapshots. Keep profiling runs separate from CPU/GC comparisons and
+use the host quiet slots, resource limits, and production guard above.
+
 ## WebSocket event diagnostic accounting
 
 `ws-event-diagnostics-measure.ts` exercises the real recording and diagnostic
