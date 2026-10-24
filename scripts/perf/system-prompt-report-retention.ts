@@ -84,8 +84,7 @@ if (values.mode === "retention") {
     buildSystemPromptReport(fixture(index)),
   );
   // Clear RegExp's implicit last-input reference, which is unrelated to report ownership.
-  // oxlint-disable-next-line typescript/prefer-includes -- This RegExp side effect releases its last input.
-  /clear/.test("clear");
+  /./.test(" ");
   await collect();
   const retainedHeap = process.memoryUsage().heapUsed - before;
   for (const report of reports) {
