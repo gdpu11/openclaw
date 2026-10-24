@@ -4585,6 +4585,8 @@ python3 scripts/perf/session-row-churn-pair.py \
 ```
 
 Increment `--pair` for each fresh pair; it swaps launch order and CPU assignment.
+The coordinator uses Gateway ports 41669 and 41679; each side also reserves its
+Gateway port + 1 for the board widget sandbox listener.
 Use `--retention` with a fresh `retention-1` root for five-wave diagnostics.
 The coordinator preserves guard/start/load metadata and rejects failed pairs.
 `python3 scripts/perf/session-row-churn-summary.py /path/to/results` reports the

@@ -41,7 +41,8 @@ try:
   task_dir=a.root/side
   for d in ['home','tmp']: (task_dir/d).mkdir(exist_ok=True)
   log=(task_dir/'measure.log').open('w');logs.append(log)
-  cmd=['systemd-run','--scope','--quiet',f'--unit={units[side]}','-p','AllowedCPUs=0-63','-p','CPUWeight=10','-p','IOWeight=10','-p','MemoryMax=24G','nice','-n','10','ionice','-c3','env',f'HOME={task_dir}/home',f'OPENCLAW_HOME={task_dir}/home',f'TMPDIR={task_dir}/tmp','node','--enable-source-maps','--import','./scripts/tsx.mjs','scripts/perf/reconnect-read-wave-measure.ts','--root',str(task_dir/'state'),'--output',str(task_dir/'output'),'--entry',str(entry.resolve()),'--clients','65','--port',str(41669 if side=='base' else 41670),'--sync',str(prefix),'--side',side]
+  # Board widgets reserve Gateway port + 1 for the MCP App sandbox listener.
+  cmd=['systemd-run','--scope','--quiet',f'--unit={units[side]}','-p','AllowedCPUs=0-63','-p','CPUWeight=10','-p','IOWeight=10','-p','MemoryMax=24G','nice','-n','10','ionice','-c3','env',f'HOME={task_dir}/home',f'OPENCLAW_HOME={task_dir}/home',f'TMPDIR={task_dir}/tmp','node','--enable-source-maps','--import','./scripts/tsx.mjs','scripts/perf/reconnect-read-wave-measure.ts','--root',str(task_dir/'state'),'--output',str(task_dir/'output'),'--entry',str(entry.resolve()),'--clients','65','--port',str(41669 if side=='base' else 41679),'--sync',str(prefix),'--side',side]
   if a.retention: cmd.append('--retention')
   # nice is additive: reset only this new launcher before requesting workload priority 10.
   children[side]=subprocess.Popen(cmd,cwd=a.checkout,stdout=log,stderr=subprocess.STDOUT,preexec_fn=lambda:os.setpriority(os.PRIO_PROCESS,0,0))
