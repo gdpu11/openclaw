@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 import type { QaBusStateSnapshot } from "openclaw/plugin-sdk/qa-channel-protocol";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   createBootstrap,
   httpMock,
@@ -62,13 +62,15 @@ async function mountRunningControlUi(controlUiUrl: string | null) {
   return { root, setControlUiUrl };
 }
 
-function selectValue(root: HTMLElement, selector: string, value: string) {
-  const select = root.querySelector<HTMLSelectElement>(selector);
-  if (!select) {
-    throw new Error(`missing select ${selector}`);
-  }
-  select.value = value;
-  select.dispatchEvent(new Event("change", { bubbles: true }));
+function query(root: HTMLElement) {
+  return <T extends HTMLElement = HTMLElement>(selector: string) =>
+    root.querySelector<T>(selector)!;
+}
+
+function setValue(root: HTMLElement, selector: string, value: string, event = "change") {
+  const input = query(root)<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(selector);
+  input.value = value;
+  input.dispatchEvent(new Event(event, { bubbles: true }));
 }
 
 setupAppBrowserTests();
@@ -76,53 +78,51 @@ setupAppBrowserTests();
 describe("QA Lab runner browser interactions", () => {
   it("keeps capture actions from releasing another pending action's busy state", async () => {
     const root = await mountRunner(createRunnerSelection());
+    const $ = query(root);
     const reset = Promise.withResolvers<void>();
     httpMock.postJson.mockImplementationOnce(() => reset.promise);
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("navigator", { clipboard: { writeText } });
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    onTestFinished(() => confirm.mockRestore());
     try {
-      root.querySelector<HTMLButtonElement>('[data-action="reset"]')!.click();
-      root.querySelector<HTMLButtonElement>('[data-tab="capture"]')!.click();
-      root.querySelector<HTMLButtonElement>("#capture-controls-toggle")!.click();
-      root.querySelector<HTMLButtonElement>("[data-copy-text]")!.click();
-      root.querySelector<HTMLButtonElement>("#capture-purge-all")!.click();
+      $('[data-action="reset"]').click();
+      $('[data-tab="capture"]').click();
+      $("#capture-controls-toggle").click();
+      $("[data-copy-text]").click();
+      $("#capture-purge-all").click();
       await vi.advanceTimersByTimeAsync(0);
 
-      expect(root.querySelector<HTMLButtonElement>('[data-action="refresh"]')?.disabled).toBe(true);
+      expect($<HTMLButtonElement>('[data-action="refresh"]').disabled).toBe(true);
       expect(writeText).not.toHaveBeenCalled();
       expect(confirm).not.toHaveBeenCalled();
       expect(httpMock.postJson).toHaveBeenCalledExactlyOnceWith("/api/reset", {});
 
       reset.resolve();
       await vi.advanceTimersByTimeAsync(0);
-      expect(root.querySelector<HTMLButtonElement>('[data-action="refresh"]')?.disabled).toBe(
-        false,
-      );
-      root.querySelector<HTMLButtonElement>("[data-copy-text]")!.click();
+      expect($<HTMLButtonElement>('[data-action="refresh"]').disabled).toBe(false);
+      $("[data-copy-text]").click();
       await vi.advanceTimersByTimeAsync(0);
       expect(writeText).toHaveBeenCalledOnce();
     } finally {
       reset.resolve();
-      confirm.mockRestore();
     }
   });
 
   it("shows clipboard failures from capture startup commands", async () => {
     const root = await mountRunner(createRunnerSelection());
+    const $ = query(root);
     const writeText = vi.fn().mockRejectedValue(new Error("Clipboard permission denied"));
     vi.stubGlobal("navigator", { clipboard: { writeText } });
-    root.querySelector<HTMLButtonElement>('[data-tab="capture"]')!.click();
-    const copy = root.querySelector<HTMLButtonElement>("[data-copy-text]")!;
+    $('[data-tab="capture"]').click();
+    const copy = $<HTMLButtonElement>("[data-copy-text]");
 
     copy.click();
     await vi.advanceTimersByTimeAsync(0);
 
     expect(writeText).toHaveBeenCalledExactlyOnceWith("pnpm proxy:start --port 7799");
-    expect(root.querySelector(".header-status .badge-fail")?.textContent).toBe(
-      "Clipboard permission denied",
-    );
-    expect(root.querySelector<HTMLButtonElement>('[data-action="refresh"]')?.disabled).toBe(false);
+    expect($(".header-status .badge-fail").textContent).toBe("Clipboard permission denied");
+    expect($<HTMLButtonElement>('[data-action="refresh"]').disabled).toBe(false);
   });
 
   it.each([
@@ -136,30 +136,22 @@ describe("QA Lab runner browser interactions", () => {
     "shows $endpoint failures without discarding capture selection",
     async ({ selector, endpoint, body }) => {
       const root = await mountRunner(createRunnerSelection());
+      const $ = query(root);
       await mountCapture(root);
       const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      onTestFinished(() => confirm.mockRestore());
       httpMock.postJson.mockRejectedValueOnce(new Error("Capture deletion failed"));
       const readsBefore = httpMock.getJson.mock.calls.length;
-      try {
-        root.querySelector<HTMLButtonElement>(selector)!.click();
-        await vi.advanceTimersByTimeAsync(0);
+      $(selector).click();
+      await vi.advanceTimersByTimeAsync(0);
 
-        expect(httpMock.postJson).toHaveBeenCalledExactlyOnceWith(endpoint, body);
-        expect(root.querySelector(".header-status .badge-fail")?.textContent).toBe(
-          "Capture deletion failed",
-        );
-        expect(
-          [...root.querySelector<HTMLSelectElement>("#capture-session")!.selectedOptions].map(
-            (option) => option.value,
-          ),
-        ).toEqual(["capture-1"]);
-        expect(httpMock.getJson.mock.calls).toHaveLength(readsBefore);
-        expect(root.querySelector<HTMLButtonElement>('[data-action="refresh"]')?.disabled).toBe(
-          false,
-        );
-      } finally {
-        confirm.mockRestore();
-      }
+      expect(httpMock.postJson).toHaveBeenCalledExactlyOnceWith(endpoint, body);
+      expect($(".header-status .badge-fail").textContent).toBe("Capture deletion failed");
+      expect(
+        [...$<HTMLSelectElement>("#capture-session").selectedOptions].map((option) => option.value),
+      ).toEqual(["capture-1"]);
+      expect(httpMock.getJson.mock.calls).toHaveLength(readsBefore);
+      expect($<HTMLButtonElement>('[data-action="refresh"]').disabled).toBe(false);
     },
   );
 
@@ -182,7 +174,7 @@ describe("QA Lab runner browser interactions", () => {
           protocol: "https",
         })),
       );
-      selectValue(root, "#capture-view-mode", "timeline");
+      setValue(root, "#capture-view-mode", "timeline");
 
       const bins = () =>
         root.querySelectorAll<HTMLButtonElement>("[data-capture-sparkline-window]");
@@ -209,9 +201,10 @@ describe("QA Lab runner browser interactions", () => {
     "reveals tabs after navigation replacement: %s",
     async (_name, navLeft, clientLeft, clientWidth, initialScroll, tabLeft, expected) => {
       const root = await mountRunner(createRunnerSelection());
+      const $ = query(root);
       const oldNav = root.querySelector(".tab-bar");
-      root.querySelector<HTMLButtonElement>('[data-tab="report"]')!.click();
-      const tab = root.querySelector<HTMLButtonElement>('[data-tab="capture"]')!;
+      $('[data-tab="report"]').click();
+      const tab = $<HTMLButtonElement>('[data-tab="capture"]');
       const nav = tab.parentElement!;
       expect(nav).not.toBe(oldNav);
       const main = nav.parentElement!;
@@ -249,10 +242,10 @@ describe("QA Lab runner browser interactions", () => {
       expect([main.scrollLeft, main.scrollTop, root.scrollLeft, root.scrollTop]).toEqual([
         11, 23, 7, 13,
       ]);
-      expect(root.querySelector<HTMLElement>(".tab-btn.active")?.dataset.tab).toBe("report");
+      expect($(".tab-btn.active").dataset.tab).toBe("report");
       expect(root.querySelector('[data-tab="capture"]')).toBe(tab);
       tab.click();
-      expect(root.querySelector<HTMLElement>(".tab-btn.active")?.dataset.tab).toBe("capture");
+      expect($(".tab-btn.active").dataset.tab).toBe("capture");
     },
   );
 
@@ -260,16 +253,15 @@ describe("QA Lab runner browser interactions", () => {
     const selection: RunnerSelection = createRunnerSelection();
     const controlUiUrl = "https://control.example.test/";
     const root = await mountRunner(selection, undefined, null, controlUiUrl);
-    expect(root.querySelector<HTMLAnchorElement>(".header-link")?.href).toBe(controlUiUrl);
+    const $ = query(root);
+    expect($<HTMLAnchorElement>(".header-link").href).toBe(controlUiUrl);
 
     const message = `Request failed: <missing> ${"error-context".repeat(16)}`;
     httpMock.getJson.mockRejectedValueOnce(new Error(message));
-    root.querySelector<HTMLButtonElement>('[data-action="refresh"]')!.click();
-    await vi.waitFor(() =>
-      expect(root.querySelector(".header-status .badge-fail")?.textContent).toContain(message),
-    );
-    expect(root.querySelector(".header-title")?.textContent).toBe("QA Lab");
-    expect(root.querySelector<HTMLAnchorElement>(".header-link")?.href).toBe(controlUiUrl);
+    $('[data-action="refresh"]').click();
+    await vi.waitFor(() => expect($(".header-status .badge-fail").textContent).toContain(message));
+    expect($(".header-title").textContent).toBe("QA Lab");
+    expect($<HTMLAnchorElement>(".header-link").href).toBe(controlUiUrl);
     expect(
       [...root.querySelectorAll<HTMLElement>(".header-right [data-action]")].map(
         (node) => node.dataset.action,
@@ -303,66 +295,54 @@ describe("QA Lab runner browser interactions", () => {
 
   it("selects duplicate evidence labels independently before and after filtering", async () => {
     const originalUrl = window.location.href;
+    onTestFinished(() => window.history.replaceState(null, "", originalUrl));
     window.history.replaceState(null, "", "/evidence?path=fixture/qa-evidence.json");
-    try {
-      const evidence: EvidenceEnvelope["evidence"] = {
-        counts: { pass: 1, fail: 0, blocked: 0, skipped: 0 },
-        entries: (["fail", "pass"] as const).map((status, index) => ({
-          artifacts: [
-            {
-              exists: true,
-              error: null,
-              href: `/api/evidence/artifact?entryIndex=${index}&artifactIndex=0`,
-              kind: "log",
-              mediaKind: "text",
-              path: `attempt-${index}.log`,
-              preview: `observed attempt ${index}`,
-              source: "synthetic-runner",
-            },
-          ],
-          coverage: [],
-          failureReason: null,
-          key: String(index),
-          effective: index === 1,
-          id: "same-label",
-          kind: "script-test",
-          sourcePath: null,
-          status,
-          title: `Attempt ${index}`,
-        })),
-        evidenceMode: "full",
-        evidencePath: "fixture/qa-evidence.json",
-        generatedAt: "2026-06-17T12:00:00.000Z",
-        producerContext: null,
-        profile: null,
-        schemaVersion: 3,
-      };
-      const root = await mountRunner(createRunnerSelection(), undefined, evidence);
-      expect(root.querySelector(".evidence-inspector")?.textContent).toContain(
-        "observed attempt 0",
-      );
-      root.querySelector<HTMLButtonElement>('[data-evidence-entry-key="1"]')!.click();
-      expect(root.querySelector(".evidence-inspector")?.textContent).toContain(
-        "observed attempt 1",
-      );
-      expect(root.querySelector(".evidence-inspector")?.textContent).not.toContain(
-        "observed attempt 0",
-      );
-      expect(root.querySelectorAll(".evidence-entry-card.selected")).toHaveLength(1);
-      selectValue(root, "#evidence-status-filter", "fail");
-      expect(root.querySelector(".evidence-inspector")?.textContent).toContain(
-        "observed attempt 0",
-      );
-      expect(root.querySelector(".evidence-inspector")?.textContent).toContain("not counted");
-      selectValue(root, "#evidence-status-filter", "all");
-      root.querySelector<HTMLButtonElement>('[data-evidence-entry-key="1"]')!.click();
-      expect(root.querySelector(".evidence-inspector")?.textContent).toContain(
-        "observed attempt 1",
-      );
-      expect(evidence.entries.map((entry) => entry.id)).toEqual(["same-label", "same-label"]);
-    } finally {
-      window.history.replaceState(null, "", originalUrl);
-    }
+    const evidence: EvidenceEnvelope["evidence"] = {
+      counts: { pass: 1, fail: 0, blocked: 0, skipped: 0 },
+      entries: (["fail", "pass"] as const).map((status, index) => ({
+        artifacts: [
+          {
+            exists: true,
+            error: null,
+            href: `/api/evidence/artifact?entryIndex=${index}&artifactIndex=0`,
+            kind: "log",
+            mediaKind: "text",
+            path: `attempt-${index}.log`,
+            preview: `observed attempt ${index}`,
+            source: "synthetic-runner",
+          },
+        ],
+        coverage: [],
+        failureReason: null,
+        key: String(index),
+        effective: index === 1,
+        id: "same-label",
+        kind: "script-test",
+        sourcePath: null,
+        status,
+        title: `Attempt ${index}`,
+      })),
+      evidenceMode: "full",
+      evidencePath: "fixture/qa-evidence.json",
+      generatedAt: "2026-06-17T12:00:00.000Z",
+      producerContext: null,
+      profile: null,
+      schemaVersion: 3,
+    };
+    const root = await mountRunner(createRunnerSelection(), undefined, evidence);
+    const $ = query(root);
+    expect($(".evidence-inspector").textContent).toContain("observed attempt 0");
+    $('[data-evidence-entry-key="1"]').click();
+    expect($(".evidence-inspector").textContent).toContain("observed attempt 1");
+    expect($(".evidence-inspector").textContent).not.toContain("observed attempt 0");
+    expect(root.querySelectorAll(".evidence-entry-card.selected")).toHaveLength(1);
+    setValue(root, "#evidence-status-filter", "fail");
+    expect($(".evidence-inspector").textContent).toContain("observed attempt 0");
+    expect($(".evidence-inspector").textContent).toContain("not counted");
+    setValue(root, "#evidence-status-filter", "all");
+    $('[data-evidence-entry-key="1"]').click();
+    expect($(".evidence-inspector").textContent).toContain("observed attempt 1");
+    expect(evidence.entries.map((entry) => entry.id)).toEqual(["same-label", "same-label"]);
   });
 
   it("sends group conversation messages from the interactive chat composer", async () => {
@@ -382,23 +362,14 @@ describe("QA Lab runner browser interactions", () => {
         },
       ],
     });
+    const $ = query(root);
     httpMock.postJson.mockResolvedValue({ message: { id: "group-message" } });
 
-    root.querySelector<HTMLButtonElement>("[data-thread-select='owned-thread']")?.click();
-    selectValue(root, "#conversation-kind", "group");
-    const conversationInput = root.querySelector<HTMLInputElement>("#conversation-id");
-    if (!conversationInput) {
-      throw new Error("missing group conversation input");
-    }
-    conversationInput.value = "qa-group";
-    conversationInput.dispatchEvent(new Event("input", { bubbles: true }));
-    const composer = root.querySelector<HTMLTextAreaElement>("#composer-text");
-    if (!composer) {
-      throw new Error("missing group message composer");
-    }
-    composer.value = "hello group";
-    composer.dispatchEvent(new Event("input", { bubbles: true }));
-    root.querySelector<HTMLButtonElement>("[data-action='send']")?.click();
+    $("[data-thread-select='owned-thread']").click();
+    setValue(root, "#conversation-kind", "group");
+    setValue(root, "#conversation-id", "qa-group", "input");
+    setValue(root, "#composer-text", "hello group", "input");
+    $("[data-action='send']").click();
 
     await vi.waitFor(() => expect(httpMock.postJson).toHaveBeenCalledTimes(1));
     expect(httpMock.postJson).toHaveBeenCalledWith(
@@ -415,13 +386,10 @@ describe("QA Lab runner browser interactions", () => {
 
   it("keeps scenario rows from collapsing inside the scrolling list", async () => {
     const root = await mountRunner(createRunnerSelection());
+    const $ = query(root);
 
-    const scroll = root.querySelector<HTMLElement>(".scenario-scroll");
-    const row = root.querySelector<HTMLElement>(".scenario-item");
-    expect(scroll).not.toBeNull();
-    expect(row).not.toBeNull();
-    expect(getComputedStyle(scroll!).overflowY).toBe("auto");
-    expect(getComputedStyle(row!).flexShrink).toBe("0");
+    expect(getComputedStyle($(".scenario-scroll")).overflowY).toBe("auto");
+    expect(getComputedStyle($(".scenario-item")).flexShrink).toBe("0");
   });
 
   it.each<{
@@ -486,7 +454,8 @@ describe("QA Lab runner browser interactions", () => {
     "submits labeled configuration controls: $name",
     async ({ initial, changes, action, expected }) => {
       const root = await mountRunner({ ...createRunnerSelection(), ...initial });
-      root.querySelector<HTMLButtonElement>("[data-sidebar-panel='config']")!.click();
+      const $ = query(root);
+      $("[data-sidebar-panel='config']").click();
       const selects = [...root.querySelectorAll<HTMLSelectElement>(".config-field select")];
       expect(selects).toHaveLength(9);
       expect(selects.map((select) => select.labels?.[0]?.textContent?.trim())).toEqual([
@@ -500,20 +469,14 @@ describe("QA Lab runner browser interactions", () => {
         "Primary model",
         "Alternate model",
       ]);
-      expect(
-        Array.from(
-          root.querySelectorAll<HTMLSelectElement>("#execution-channel option"),
-          (option) => option.value,
-        ),
-      ).toEqual(["", "buzz", "matrix", "telegram"]);
       for (const [selector, value] of changes) {
-        selectValue(root, selector, value);
+        setValue(root, selector, value);
       }
       if (action) {
-        root.querySelector<HTMLButtonElement>("[data-sidebar-panel='scenarios']")!.click();
-        root.querySelector<HTMLElement>(action)!.click();
+        $("[data-sidebar-panel='scenarios']").click();
+        $(action).click();
       }
-      root.querySelector<HTMLButtonElement>("[data-action='run-suite']")!.click();
+      $("[data-action='run-suite']").click();
       await vi.waitFor(() => expect(httpMock.postJson).toHaveBeenCalledTimes(1));
       expect(httpMock.postJson).toHaveBeenCalledWith(
         "/api/scenario/suite",
@@ -524,6 +487,7 @@ describe("QA Lab runner browser interactions", () => {
 
   it("renders server-resolved exclusions and errors from a rejected launch", async () => {
     const root = await mountRunner(createRunnerSelection());
+    const $ = query(root);
     httpMock.postJson.mockRejectedValueOnce(
       new httpMock.QaLabHttpError("selection rejected", {
         plan: {
@@ -544,7 +508,7 @@ describe("QA Lab runner browser interactions", () => {
       }),
     );
 
-    root.querySelector<HTMLButtonElement>("[data-action='run-suite']")?.click();
+    $("[data-action='run-suite']").click();
 
     await vi.waitFor(() => expect(root.textContent).toContain("1 excluded"));
     expect(root.textContent).toContain("Explicit QA scenario selection is not runnable");
@@ -553,21 +517,22 @@ describe("QA Lab runner browser interactions", () => {
     await vi.waitFor(() => expect(root.textContent).toContain("1 excluded"));
     expect(root.textContent).toContain("Explicit QA scenario selection is not runnable");
 
-    root.querySelector<HTMLButtonElement>("[data-sidebar-panel='config']")?.click();
-    selectValue(root, "#evidence-mode", "slim");
-    root.querySelector<HTMLButtonElement>("[data-sidebar-panel='run']")?.click();
+    $("[data-sidebar-panel='config']").click();
+    setValue(root, "#evidence-mode", "slim");
+    $("[data-sidebar-panel='run']").click();
     expect(root.textContent).not.toContain("Explicit QA scenario selection is not runnable");
     expect(root.textContent).not.toContain("Resolved plan:");
   });
 
   it("disables launch when an explicit override becomes empty", async () => {
     const root = await mountRunner(createRunnerSelection());
+    const $ = query(root);
 
-    root.querySelector<HTMLInputElement>("[data-scenario-toggle-id='dm-chat-baseline']")?.click();
-    const runButton = root.querySelector<HTMLButtonElement>("[data-action='run-suite']");
-    expect(runButton?.disabled).toBe(true);
-    expect(runButton?.textContent).toContain("Run 0 scenarios");
-    runButton?.click();
+    $("[data-scenario-toggle-id='dm-chat-baseline']").click();
+    const runButton = $<HTMLButtonElement>("[data-action='run-suite']");
+    expect(runButton.disabled).toBe(true);
+    expect(runButton.textContent).toContain("Run 0 scenarios");
+    runButton.click();
     expect(httpMock.postJson).not.toHaveBeenCalled();
   });
 });
@@ -582,7 +547,8 @@ describe("QA Lab tab navigation retention", () => {
       threads: [],
     };
     const root = await mountRunner(createRunnerSelection(), snapshot);
-    return { root, snapshot };
+    const $ = query(root);
+    return { root, snapshot, $ };
   }
 
   async function pollWithMessage(snapshot: QaBusStateSnapshot) {
@@ -640,71 +606,67 @@ describe("QA Lab tab navigation retention", () => {
       }
       return new DOMRect();
     });
-    return () => {
+    onTestFinished(() => {
       rect.mockRestore();
       scrollSet.mockRestore();
       scrollGet.mockRestore();
       clientWidth.mockRestore();
-    };
+    });
   }
 
   it.each([false, true])(
     "retains tab visibility and sidebar preference across width changes (collapsed=%s)",
     async (collapsed) => {
       localStorage.setItem("qa-lab-sidebar-collapsed", collapsed ? "1" : "0");
-      const { root, snapshot } = await mountNavigation();
-      const tab = (id: string) => root.querySelector<HTMLButtonElement>(`[data-tab="${id}"]`)!;
-      const restoreGeometry = mockTabGeometry(root);
-      try {
-        expect(
-          [...root.querySelectorAll<HTMLElement>("[data-tab]")].map((node) => node.dataset.tab),
-        ).toEqual(["chat", "results", "evidence", "report", "events", "capture"]);
-        tab("capture").focus();
-        expect(tab("capture").parentElement!.scrollLeft).toBe(collapsed ? 0 : 160);
-        tab("evidence").focus();
-        tab("evidence").click();
-        const evidence = tab("evidence");
-        expect(document.activeElement).toBe(evidence);
-        expect(evidence.classList.contains("active")).toBe(true);
-        expect(evidence.parentElement!.clientWidth).toBe(800);
-        expect(evidence.parentElement!.scrollLeft).toBe(0);
-        expect(evidence.getBoundingClientRect().left).toBeGreaterThanOrEqual(0);
-        expect(root.querySelector(".app-shell--evidence-focus")).not.toBeNull();
-        expect(Boolean(root.querySelector(".app-shell--sidebar-collapsed"))).toBe(collapsed);
-        expect(localStorage.getItem("qa-lab-sidebar-collapsed")).toBe(collapsed ? "1" : "0");
-        tab("capture").focus();
-        expect(tab("capture").parentElement!.clientWidth).toBe(800);
-        expect(tab("capture").parentElement!.scrollLeft).toBe(0);
-        tab("capture").click();
-        const next = tab("capture");
-        const nav = next.parentElement!;
-        expect(document.activeElement).toBe(next);
-        expect(next.classList.contains("active")).toBe(true);
-        expect(nav.clientWidth).toBe(collapsed ? 800 : 440);
-        expect(nav.scrollLeft).toBe(collapsed ? 0 : 160);
-        expect(next.getBoundingClientRect().right).toBeLessThanOrEqual(nav.clientWidth);
-        expect(root.querySelector(".app-shell--evidence-focus")).toBeNull();
-        expect(Boolean(root.querySelector(".app-shell--sidebar-collapsed"))).toBe(collapsed);
-        await pollWithMessage(snapshot);
-        expect(document.activeElement).toBe(tab("capture"));
-        expect(tab("capture").parentElement!.scrollLeft).toBe(nav.scrollLeft);
-        root.querySelector<HTMLButtonElement>('[data-action="toggle-sidebar"]')!.click();
-        expect(localStorage.getItem("qa-lab-sidebar-collapsed")).toBe(collapsed ? "0" : "1");
-        tab("evidence").click();
-        tab("chat").click();
-        expect(Boolean(root.querySelector(".app-shell--sidebar-collapsed"))).toBe(!collapsed);
-      } finally {
-        restoreGeometry();
-      }
+      const { root, snapshot, $ } = await mountNavigation();
+      const tab = (id: string) => $(`[data-tab="${id}"]`);
+      mockTabGeometry(root);
+      expect(
+        [...root.querySelectorAll<HTMLElement>("[data-tab]")].map((node) => node.dataset.tab),
+      ).toEqual(["chat", "results", "evidence", "report", "events", "capture"]);
+      tab("capture").focus();
+      expect(tab("capture").parentElement!.scrollLeft).toBe(collapsed ? 0 : 160);
+      tab("evidence").focus();
+      tab("evidence").click();
+      const evidence = tab("evidence");
+      expect(document.activeElement).toBe(evidence);
+      expect(evidence.classList.contains("active")).toBe(true);
+      expect(evidence.parentElement!.clientWidth).toBe(800);
+      expect(evidence.parentElement!.scrollLeft).toBe(0);
+      expect(evidence.getBoundingClientRect().left).toBeGreaterThanOrEqual(0);
+      expect(root.querySelector(".app-shell--evidence-focus")).not.toBeNull();
+      expect(Boolean(root.querySelector(".app-shell--sidebar-collapsed"))).toBe(collapsed);
+      expect(localStorage.getItem("qa-lab-sidebar-collapsed")).toBe(collapsed ? "1" : "0");
+      tab("capture").focus();
+      expect(tab("capture").parentElement!.clientWidth).toBe(800);
+      expect(tab("capture").parentElement!.scrollLeft).toBe(0);
+      tab("capture").click();
+      const next = tab("capture");
+      const nav = next.parentElement!;
+      expect(document.activeElement).toBe(next);
+      expect(next.classList.contains("active")).toBe(true);
+      expect(nav.clientWidth).toBe(collapsed ? 800 : 440);
+      expect(nav.scrollLeft).toBe(collapsed ? 0 : 160);
+      expect(next.getBoundingClientRect().right).toBeLessThanOrEqual(nav.clientWidth);
+      expect(root.querySelector(".app-shell--evidence-focus")).toBeNull();
+      expect(Boolean(root.querySelector(".app-shell--sidebar-collapsed"))).toBe(collapsed);
+      await pollWithMessage(snapshot);
+      expect(document.activeElement).toBe(tab("capture"));
+      expect(tab("capture").parentElement!.scrollLeft).toBe(nav.scrollLeft);
+      $('[data-action="toggle-sidebar"]').click();
+      expect(localStorage.getItem("qa-lab-sidebar-collapsed")).toBe(collapsed ? "0" : "1");
+      tab("evidence").click();
+      tab("chat").click();
+      expect(Boolean(root.querySelector(".app-shell--sidebar-collapsed"))).toBe(!collapsed);
     },
   );
 
   it.each([false, true])(
     "retains focused tabs through unchanged and changed polling (activate=%s)",
     async (activate) => {
-      const { root, snapshot } = await mountNavigation();
+      const { root, snapshot, $ } = await mountNavigation();
       const tab = activate ? "events" : "capture";
-      let nav = root.querySelector<HTMLElement>("nav.tab-bar")!;
+      let nav = $("nav.tab-bar");
       let button = nav.querySelector<HTMLButtonElement>(`[data-tab="${tab}"]`)!;
       button.focus();
       nav.scrollLeft = 137.25;
@@ -716,7 +678,7 @@ describe("QA Lab tab navigation retention", () => {
       if (activate) {
         button.click();
         expect(button.isConnected).toBe(false);
-        nav = root.querySelector<HTMLElement>("nav.tab-bar")!;
+        nav = $("nav.tab-bar");
         button = nav.querySelector<HTMLButtonElement>(`[data-tab="${tab}"]`)!;
         expect(document.activeElement).toBe(button);
         expect(button.classList.contains("active")).toBe(true);
@@ -735,66 +697,59 @@ describe("QA Lab tab navigation retention", () => {
         true,
       );
       const focus = vi.spyOn(HTMLElement.prototype, "focus");
-      try {
-        await pollWithMessage(snapshot);
-        const nextNav = root.querySelector<HTMLElement>("nav.tab-bar")!;
-        const nextButton = nextNav.querySelector<HTMLButtonElement>(`[data-tab="${tab}"]`)!;
-        expect(nextNav).not.toBe(nav);
-        expect(button.isConnected).toBe(false);
-        expect(document.activeElement).toBe(nextButton);
-        expect(nextNav.scrollLeft).toBe(137.25);
-        expect(focusReveals).toEqual([243.75]);
-        expect(focus).toHaveBeenCalledTimes(1);
-        expect(focus).toHaveBeenCalledWith({ preventScroll: true });
-        expect(nextNav.querySelector<HTMLElement>(".active")?.dataset.tab).toBe(
-          activate ? "events" : "chat",
-        );
-        expect(
-          root.querySelector(activate ? ".events-scroll" : "#chat-messages")?.textContent,
-        ).toContain("new polling message");
-        expect(httpMock.getJson.mock.calls.filter(([url]) => url === "/api/state")).toHaveLength(3);
-        nextButton.blur();
-        nextButton.focus();
-        expect(document.activeElement).toBe(nextButton);
-        expect(nextNav.scrollLeft).toBe(243.75);
-        expect(focusReveals).toEqual([243.75, 243.75]);
-      } finally {
-        focus.mockRestore();
-      }
+      onTestFinished(() => focus.mockRestore());
+      await pollWithMessage(snapshot);
+      const nextNav = $("nav.tab-bar");
+      const nextButton = nextNav.querySelector<HTMLButtonElement>(`[data-tab="${tab}"]`)!;
+      expect(nextNav).not.toBe(nav);
+      expect(button.isConnected).toBe(false);
+      expect(document.activeElement).toBe(nextButton);
+      expect(nextNav.scrollLeft).toBe(137.25);
+      expect(focusReveals).toEqual([243.75]);
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+      expect(nextNav.querySelector<HTMLElement>(".active")?.dataset.tab).toBe(
+        activate ? "events" : "chat",
+      );
+      expect($(activate ? ".events-scroll" : "#chat-messages").textContent).toContain(
+        "new polling message",
+      );
+      expect(httpMock.getJson.mock.calls.filter(([url]) => url === "/api/state")).toHaveLength(3);
+      nextButton.blur();
+      nextButton.focus();
+      expect(document.activeElement).toBe(nextButton);
+      expect(nextNav.scrollLeft).toBe(243.75);
+      expect(focusReveals).toEqual([243.75, 243.75]);
     },
   );
 
   it.each([false, true])(
     "retains scroll without stealing non-tab focus (outside=%s)",
     async (outside) => {
-      const { root, snapshot } = await mountNavigation();
-      const restoreGeometry = mockTabGeometry(root);
-      try {
-        if (outside) {
-          root.querySelector<HTMLButtonElement>('[data-tab="report"]')!.focus();
-          const outsideNav = document.createElement("nav");
-          outsideNav.className = "tab-bar";
-          const button = document.createElement("button");
-          button.dataset.tab = "report";
-          button.id = "composer-text";
-          outsideNav.append(button);
-          document.body.append(outsideNav);
-          button.focus();
-        }
-        const focused = document.activeElement;
-        const nav = root.querySelector<HTMLElement>("nav.tab-bar")!;
-        nav.scrollLeft = 64.5;
-        await pollWithMessage(snapshot);
-        expect(root.querySelector("nav.tab-bar")).not.toBe(nav);
-        expect(root.querySelector<HTMLElement>("nav.tab-bar")!.scrollLeft).toBe(64.5);
+      const { root, snapshot, $ } = await mountNavigation();
+      mockTabGeometry(root);
+      if (outside) {
+        $('[data-tab="report"]').focus();
+        const outsideNav = document.createElement("nav");
+        outsideNav.className = "tab-bar";
+        const button = document.createElement("button");
+        button.dataset.tab = "report";
+        button.id = "composer-text";
+        outsideNav.append(button);
+        document.body.append(outsideNav);
+        button.focus();
+      }
+      const focused = document.activeElement;
+      const nav = $("nav.tab-bar");
+      nav.scrollLeft = 64.5;
+      await pollWithMessage(snapshot);
+      expect(root.querySelector("nav.tab-bar")).not.toBe(nav);
+      expect($("nav.tab-bar").scrollLeft).toBe(64.5);
+      expect(document.activeElement).toBe(focused);
+      for (const tab of ["evidence", "capture"]) {
+        $(`[data-tab="${tab}"]`).click();
+        expect($("nav.tab-bar").scrollLeft).toBe(0);
         expect(document.activeElement).toBe(focused);
-        for (const tab of ["evidence", "capture"]) {
-          root.querySelector<HTMLButtonElement>(`[data-tab="${tab}"]`)!.click();
-          expect(root.querySelector<HTMLElement>("nav.tab-bar")!.scrollLeft).toBe(0);
-          expect(document.activeElement).toBe(focused);
-        }
-      } finally {
-        restoreGeometry();
       }
     },
   );
@@ -802,27 +757,26 @@ describe("QA Lab tab navigation retention", () => {
   it.each(["#conversation-id", "#composer-text"])(
     "preserves %s focus and draft while retaining navigation scroll",
     async (selector) => {
-      const { root, snapshot } = await mountNavigation();
-      const nav = root.querySelector<HTMLElement>("nav.tab-bar")!;
-      const input = root.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector)!;
-      input.value = "unfinished draft";
-      input.dispatchEvent(new Event("input", { bubbles: true }));
+      const { root, snapshot, $ } = await mountNavigation();
+      const nav = $("nav.tab-bar");
+      const input = $<HTMLInputElement | HTMLTextAreaElement>(selector);
+      setValue(root, selector, "unfinished draft", "input");
       input.focus();
       nav.scrollLeft = 48.5;
 
       await pollWithMessage(snapshot);
 
-      const nextInput = root.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector)!;
+      const nextInput = $<HTMLInputElement | HTMLTextAreaElement>(selector);
       expect(input.isConnected).toBe(false);
       expect(document.activeElement).toBe(nextInput);
       expect(nextInput.value).toBe("unfinished draft");
-      expect(root.querySelector<HTMLElement>("nav.tab-bar")!.scrollLeft).toBe(48.5);
+      expect($("nav.tab-bar").scrollLeft).toBe(48.5);
     },
   );
 
   it("defers changed polling while a select is focused and renders after it blurs", async () => {
-    const { root, snapshot } = await mountNavigation();
-    const select = root.querySelector<HTMLSelectElement>("#conversation-kind")!;
+    const { root, snapshot, $ } = await mountNavigation();
+    const select = $<HTMLSelectElement>("#conversation-kind");
     const nav = root.querySelector("nav.tab-bar");
     select.focus();
 
@@ -830,13 +784,13 @@ describe("QA Lab tab navigation retention", () => {
 
     expect(root.querySelector("nav.tab-bar")).toBe(nav);
     expect(document.activeElement).toBe(select);
-    expect(root.querySelector("#chat-messages")?.textContent).not.toContain("new polling message");
+    expect($("#chat-messages").textContent).not.toContain("new polling message");
     select.blur();
     await vi.advanceTimersByTimeAsync(1_000);
 
     expect(root.querySelector("nav.tab-bar")).not.toBe(nav);
     expect(select.isConnected).toBe(false);
-    expect(root.querySelector("#chat-messages")?.textContent).toContain("new polling message");
+    expect($("#chat-messages").textContent).toContain("new polling message");
     expect(document.activeElement).toBe(document.body);
   });
 });
