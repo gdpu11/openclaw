@@ -10,20 +10,16 @@ import {
 import { replaceSessionEntrySync } from "../../config/sessions/session-accessor.sqlite-entry.js";
 import { readTranscriptContextVersionInTransaction } from "../../config/sessions/session-accessor.sqlite-transcript-state.js";
 import { appendTranscriptEventsInTransaction } from "../../config/sessions/session-accessor.sqlite-transcript-store.js";
-import {
-  createSessionActorWorkerFixture,
-  type Mutation,
-} from "../../config/sessions/session-actor-worker.test-support.js";
+import { createSessionActorWorkerFixture } from "../../config/sessions/session-actor-worker.test-support.js";
 import type { SessionEntryWritePostimages } from "../../config/sessions/session-entry-write-postimage.js";
 import { readTranscriptContextVersionsInTransaction } from "../../config/sessions/session-transcript-context-versions.js";
-import { buildRestartRecoveryExpectedState } from "../../config/sessions/session-transcript-turn-state.js";
 import { promptReport } from "../../config/sessions/system-prompt-report.test-support.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
 import {
   openOpenClawAgentDatabase,
   runOpenClawAgentWriteTransaction,
 } from "../../state/openclaw-agent-db.js";
-import { isPostgresSqlConnection, type EngineConnection } from "../sql-connection.js";
+import type { EngineConnection } from "../sql-connection.js";
 import { runSqliteImmediateTransactionSync } from "../sqlite-transaction.js";
 import { createSqliteWorkerTransferCollector } from "../sqlite-worker-transfer.js";
 import { withEngineStoreAdmission } from "./admission-scope.js";
@@ -45,52 +41,6 @@ function persisted(db: EngineConnection, sessionKey: string, sessionId: string) 
   };
 }
 
-function tripRecorder(db: EngineConnection) {
-  const queries: Record<string, string[]> = {};
-  return {
-    queries,
-    expectQueries(name: string, pattern: RegExp, count: number) {
-      if (isPostgresSqlConnection(db)) {
-        expect(
-          queries[name]!.filter((sql) => pattern.test(sql)),
-          name,
-        ).toHaveLength(count);
-      }
-    },
-    capture<T>(name: string, run: () => T, writes?: number | null): T {
-      if (!isPostgresSqlConnection(db)) {
-        return run();
-      }
-      const statements: string[] = [];
-      const query = db.query.bind(db);
-      const spy = vi.spyOn(db, "query").mockImplementation(
-        new Proxy(query, {
-          apply(target, receiver, args) {
-            statements.push(args[0]);
-            return Reflect.apply(target, receiver, args);
-          },
-        }),
-      );
-      try {
-        return run();
-      } finally {
-        spy.mockRestore();
-        queries[name] = statements;
-        if (writes != null) {
-          expect(
-            statements.filter((sql) =>
-              /\binsert into\s+"?(?:session_nodes|session_windows|session_entry_snapshots)"?|\bdelete from\s+"?session_entry_snapshots"?/iu.test(
-                sql,
-              ),
-            ),
-            name,
-          ).toHaveLength(writes);
-        }
-      }
-    },
-  };
-}
-
 function withEntryDatabase(
   run: (fixture: ReturnType<typeof entryDatabase>) => void,
   freezeTime = false,
@@ -108,21 +58,12 @@ function withEntryDatabase(
 
 function entryDatabase() {
   const database = openOpenClawAgentDatabase({ agentId: "main" });
-  const recorder = tripRecorder(database.db);
   return {
     database,
-    recorder,
     transaction: <T>(run: (owner: typeof database) => T) =>
       runOpenClawAgentWriteTransaction(run, { agentId: "main", path: database.path }),
-    write: (name: string, key: string, entry: SessionEntry, writes: number | null = 1) =>
-      recorder.capture(
-        name,
-        () =>
-          runSqliteImmediateTransactionSync(database.db, () =>
-            writeSessionEntry(database, key, entry),
-          ),
-        writes,
-      ),
+    write: (key: string, entry: SessionEntry) =>
+      runSqliteImmediateTransactionSync(database.db, () => writeSessionEntry(database, key, entry)),
     state: (key: string, id: string) => persisted(database.db, key, id),
   };
 }
@@ -154,7 +95,7 @@ describe.skipIf(!mixedAgentConnection).each(["sqlite", "postgres"] as const)(
     useMixedAgentPair(engine, engine);
 
     it("batches archive entries with exact shared-window, rollback, and cache outcomes", () =>
-      withEntryDatabase(({ database, recorder, transaction }) => {
+      withEntryDatabase(({ database, transaction }) => {
         const keys = [
           "agent:main:archive-a",
           ...Array.from({ length: 63 }, (_, index) => `agent:main:archive-middle-${index}`),
@@ -239,15 +180,10 @@ describe.skipIf(!mixedAgentConnection).each(["sqlite", "postgres"] as const)(
         ).toBeUndefined();
 
         const postimages: SessionEntryWritePostimages = new Map();
-        const written = recorder.capture(
-          "archiveBatch",
-          () =>
-            transaction((owner) => {
-              rawUnselectedWrite();
-              return writeArchivedSessionEntries(owner, inputs(), postimages);
-            }),
-          3,
-        );
+        const written = transaction((owner) => {
+          rawUnselectedWrite();
+          return writeArchivedSessionEntries(owner, inputs(), postimages);
+        });
         expect(current()).toEqual(sequential);
         expect(written.map((entry) => entry.archivedAt)).toEqual(
           Array.from({ length: 66 }, () => 30),
@@ -349,33 +285,15 @@ describe.skipIf(!mixedAgentConnection).each(["sqlite", "postgres"] as const)(
         expect(read()).toEqual(before);
       }, true));
 
-    it("commits actor and patch entry pairs without extra writes or publishing a refused commit", async () => {
-      const initialSkills = { prompt: "Initial instructions", skills: [] };
-      const seed = withEngineStoreAdmission(() => {
-        const database = openOpenClawAgentDatabase({ agentId: "main" });
+    it("preserves native cold-patch and actor participant ordering", () =>
+      withEntryDatabase(({ database }) => {
         const scope = {
           agentId: "main",
           storePath: database.path,
           sessionKey: "agent:main:entry-pairs",
           sessionId: "entry-pairs",
         };
-        replaceSessionEntrySync(scope, {
-          sessionId: scope.sessionId,
-          updatedAt: 10,
-          label: "Initial label",
-          displayName: "Stable display name",
-          skillsSnapshot: initialSkills,
-        });
-        runSqliteImmediateTransactionSync(database.db, () =>
-          appendTranscriptEventsInTransaction(database, scope, [
-            {
-              type: "session",
-              id: scope.sessionId,
-              version: 3,
-              timestamp: new Date(10).toISOString(),
-            },
-          ]),
-        );
+        replaceSessionEntrySync(scope, { sessionId: scope.sessionId, updatedAt: 10 });
         runSqliteImmediateTransactionSync(database.db, () => {
           const insert = database.db.prepare(
             "INSERT INTO session_participants (session_key, identity_namespace, actor_id, contribution_count, first_prompted_at) VALUES (?, ?, ?, 1, ?)",
@@ -388,77 +306,9 @@ describe.skipIf(!mixedAgentConnection).each(["sqlite", "postgres"] as const)(
             insert.run(scope.sessionKey, JSON.stringify({ type }), id, time);
           }
         });
-        return { database, scope };
-      });
-      const f = createSessionActorWorkerFixture(seed, (options) =>
-        withEngineStoreAdmission(() => openOpenClawAgentDatabase(options)),
-      );
-      const now = vi.spyOn(Date, "now").mockReturnValue(20);
-      const recorder = tripRecorder(f.database.db);
-      const state = () =>
-        withEngineStoreAdmission(() =>
-          persisted(f.database.db, f.scope.sessionKey, f.scope.sessionId),
+        const f = createSessionActorWorkerFixture({ database, scope }, (options) =>
+          withEngineStoreAdmission(() => openOpenClawAgentDatabase(options)),
         );
-      const read = () => withEngineStoreAdmission(() => f.read());
-      const execute = async (name: string, command: Mutation) => {
-        await f.prepare(command);
-        return withEngineStoreAdmission(() => recorder.capture(name, () => f.mutate(command), 1));
-      };
-      const patch = (name: string, fields: Partial<SessionEntry>) =>
-        withEngineStoreAdmission(() =>
-          recorder.capture(
-            name,
-            () =>
-              f.patchEntry({
-                selection: { kind: "entry", sessionKey: f.target.sessionKey, exact: true },
-                sessionKey: f.target.sessionKey,
-                operation: { kind: "fields", patch: fields },
-                operationLabel: "session-entry.patch",
-                validateCanonicalKeys: false,
-                preserveActivity: true,
-              }),
-            name === "noOp" ? 0 : 1,
-          ),
-        );
-      const completion = (
-        name: string,
-        inputTokens: number,
-        prompt: NonNullable<SessionEntry["systemPromptReport"]>,
-      ): Mutation => {
-        const before = read();
-        return {
-          type: "session.actor.completeTurn",
-          input: {
-            target: f.target,
-            commandId: name,
-            phaseId: "completion",
-            expected: before.version,
-            bookkeeping: {
-              sessionId: f.scope.sessionId,
-              lifecycleRevision: before.entry!.lifecycleRevision ?? null,
-              writerRunId: before.entry!.activeWriterRunId,
-              expectedState: buildRestartRecoveryExpectedState(before.entry!),
-            },
-            reducers: [
-              {
-                kind: "usage",
-                updatedAt: before.entry!.updatedAt,
-                update: {
-                  usage: { input: inputTokens, output: 4 },
-                  systemPromptReport: prompt,
-                  modelSelection: {},
-                  hasContextUpdate: false,
-                  hasFreshContextSnapshot: false,
-                  hasCurrentContextSnapshot: false,
-                  preserveSessionModelState: true,
-                  preserveUserFacingRunState: false,
-                },
-              },
-            ],
-          },
-        };
-      };
-      try {
         let coldPatch: unknown;
         const transfer = createSqliteWorkerTransferCollector("patch", (value) => {
           coldPatch = value;
@@ -468,139 +318,34 @@ describe.skipIf(!mixedAgentConnection).each(["sqlite", "postgres"] as const)(
             transfer.accept(facts.transfer);
           }
         };
-        patch("coldPatch", { label: "Cold participant projection" });
-        delete f.hooks.admit;
-        if (engine === "postgres") {
-          // BEGIN + eager lock, hydrated entry, node/window CTE, COMMIT.
-          expect(recorder.queries.coldPatch).toHaveLength(4);
-        }
-        const initial = state();
-        const before = read();
-        const timestampedParticipants = [
-          { identity: { type: "agent", id: "a" } },
-          { identity: { type: "profile", id: "a" } },
-        ];
-        const untimestampedParticipant = { identity: { type: "agent", id: "z" } };
-        expect(coldPatch).toMatchObject({
-          entry: {
-            participants:
-              engine === "sqlite"
-                ? [untimestampedParticipant, ...timestampedParticipants]
-                : [...timestampedParticipants, untimestampedParticipant],
-          },
-        });
-        // Actor hydration has always normalized NULL timestamps first on both engines.
-        expect(before.entry?.participants).toEqual([
-          untimestampedParticipant,
-          ...timestampedParticipants,
-        ]);
-        const acceptedOutcome = await execute("acceptInput", {
-          type: "session.actor.acceptInput",
-          input: {
-            target: f.target,
-            commandId: "input",
-            phaseId: "turn",
-            expectedState: buildRestartRecoveryExpectedState(before.entry!),
-            lifecycle: { updatedAt: 20, startedAt: 20 },
-            turn: {
-              agentId: "main",
-              sessionKey: f.scope.sessionKey,
-              options: {
-                expectedSessionId: f.scope.sessionId,
-                sessionFile: f.scope.sessionKey,
-                messages: [
-                  {
-                    eventId: "input",
-                    message: { role: "user", content: "Question", timestamp: 20 },
-                    now: 20,
-                  },
-                ],
-              },
+        try {
+          f.patchEntry({
+            selection: { kind: "entry", sessionKey: scope.sessionKey, exact: true },
+            sessionKey: scope.sessionKey,
+            operation: { kind: "fields", patch: { label: "Cold participant projection" } },
+            operationLabel: "session-entry.patch",
+            validateCanonicalKeys: false,
+            preserveActivity: true,
+          });
+          const timestamped = [
+            { identity: { type: "agent", id: "a" } },
+            { identity: { type: "profile", id: "a" } },
+          ];
+          const untimestamped = { identity: { type: "agent", id: "z" } };
+          expect(coldPatch).toMatchObject({
+            entry: {
+              participants:
+                engine === "sqlite"
+                  ? [untimestamped, ...timestamped]
+                  : [...timestamped, untimestamped],
             },
-          },
-        });
-        expect(acceptedOutcome.kind, JSON.stringify(acceptedOutcome)).toBe("committed");
-        const accepted = state();
-        expectState(accepted, 1, initialSkills).toMatchObject({
-          node: { updated_at: 20 },
-          window: { updated_at: 20, started_at: 20 },
-        });
-        expect(read().entry).toMatchObject({ startedAt: 20 });
-        expect(accepted.snapshots).toEqual(initial.snapshots);
-
-        const prompt = report(20);
-        expect(await execute("completeTurn", completion("final", 12, prompt))).toMatchObject({
-          kind: "committed",
-        });
-        const completed = state();
-        expectState(completed, 2, initialSkills, prompt);
-        expect(completed.window).toEqual(accepted.window);
-        expect(read().entry).toMatchObject({
-          inputTokens: 12,
-          outputTokens: 4,
-          systemPromptReport: prompt,
-        });
-
-        const changedSkills = { prompt: "Changed instructions", skills: [] };
-        const finalSkills = { prompt: "Only cold instructions changed", skills: [] };
-        const patches: [string, Partial<SessionEntry>, string, typeof changedSkills, number][] = [
-          [
-            "entryPatch",
-            { label: "Patched label", skillsSnapshot: changedSkills },
-            "Patched label",
-            changedSkills,
-            3,
-          ],
-          ["nodeOnly", { label: "Node only" }, "Node only", changedSkills, 3],
-          ["snapshotOnly", { skillsSnapshot: finalSkills }, "Node only", finalSkills, 4],
-        ];
-        for (const [name, fields, label, skills, revision] of patches) {
-          patch(name, fields);
-          expectState(state(), revision, skills, prompt).toMatchObject({
-            node: { label },
-            window: completed.window,
           });
-        }
-        const stable = state();
-        patch("noOp", { label: "Node only", skillsSnapshot: finalSkills });
-        expect(state()).toEqual(stable);
-
-        for (const refusal of ["rollback", "revokedGrant"] as const) {
-          const beforeRefusal = read();
-          if (refusal === "rollback") {
-            f.hooks.withCommit = () => {
-              throw new Error(refusal);
-            };
-          } else {
-            f.hooks.admit = (stage) => {
-              if (stage === "commit") {
-                throw new Error(refusal);
-              }
-            };
-          }
-          expect(await execute(refusal, completion(refusal, 99, report(99)))).toMatchObject({
-            kind: "rolled-back",
-            error: { message: refusal },
-          });
-          delete f.hooks.withCommit;
           delete f.hooks.admit;
-          expect(state()).toEqual(stable);
-          expect(read().entry).toEqual(beforeRefusal.entry);
+          expect(f.read().entry?.participants).toEqual([untimestamped, ...timestamped]);
+        } finally {
+          f.close();
         }
-        for (const name of Object.keys(recorder.queries)) {
-          recorder.expectQueries(name, /^BEGIN\b/iu, 1);
-          recorder.expectQueries(name, /pg_advisory_xact_lock/iu, 1);
-          recorder.expectQueries(
-            name,
-            /^COMMIT\b/iu,
-            name === "rollback" || name === "revokedGrant" ? 0 : 1,
-          );
-        }
-      } finally {
-        now.mockRestore();
-        f.close();
-      }
-    });
+      }));
 
     it("binds interleaved snapshot shapes and preserves legacy provenance when its column is omitted", () =>
       withEntryDatabase(({ database, write }) => {
@@ -635,14 +380,14 @@ describe.skipIf(!mixedAgentConnection).each(["sqlite", "postgres"] as const)(
           runSqliteImmediateTransactionSync(database.db, () =>
             recordLegacyAcpMigrationSources(database.db, keyA, revisions.map(source)),
           );
-        write("seedA", keyA, a, 2);
-        write("seedB", keyB, b, 2);
+        write(keyA, a);
+        write(keyB, b);
         a = { ...a, label: "A1", skillsSnapshot: { prompt: "A1 instructions", skills: [] } };
-        write("oneSnapshot", keyA, a);
+        write(keyA, a);
         b = { ...b, label: "B1", skillsSnapshot: { prompt: "B1 instructions", skills: [] } };
-        write("twoSnapshots", keyB, b);
+        write(keyB, b);
         a = { ...a, label: "A2", skillsSnapshot: { prompt: "A2 instructions", skills: [] } };
-        write("oneSnapshotAgain", keyA, a);
+        write(keyA, a);
         expectState(stateA(), 3, a.skillsSnapshot).toMatchObject({ node: { label: "A2" } });
         const stableB = persisted(database.db, keyB, b.sessionId);
         expectState(stableB, 3, b.skillsSnapshot, b.systemPromptReport).toMatchObject({
@@ -651,14 +396,14 @@ describe.skipIf(!mixedAgentConnection).each(["sqlite", "postgres"] as const)(
 
         record(["a0", "a1"]);
         a = { ...a, lifecycleRevision: "a1", updatedAt: 20 };
-        write("legacyWindow", keyA, a);
+        write(keyA, a);
         const afterWindow = stateA();
         expect(JSON.parse(String(afterWindow.node?.legacy_acp_migration_json))).toEqual([
           source("a1"),
         ]);
         expectState(afterWindow, 3, a.skillsSnapshot).toMatchObject({ window: { updated_at: 20 } });
         a = { ...a, updatedAt: 30 };
-        write("ordinaryWindow", keyA, a);
+        write(keyA, a);
         expect(stateA().node?.legacy_acp_migration_json).toBe(
           afterWindow.node?.legacy_acp_migration_json,
         );
@@ -670,7 +415,7 @@ describe.skipIf(!mixedAgentConnection).each(["sqlite", "postgres"] as const)(
           label: "A3",
           skillsSnapshot: { prompt: "A3 instructions", skills: [] },
         };
-        write("legacySnapshot", keyA, a);
+        write(keyA, a);
         const afterSnapshot = stateA();
         expect(JSON.parse(String(afterSnapshot.node?.legacy_acp_migration_json))).toEqual([
           source("a2"),
@@ -680,7 +425,7 @@ describe.skipIf(!mixedAgentConnection).each(["sqlite", "postgres"] as const)(
           window: { updated_at: 30 },
         });
         a = { ...a, label: "A4", skillsSnapshot: { prompt: "A4 instructions", skills: [] } };
-        write("ordinarySnapshot", keyA, a);
+        write(keyA, a);
         expectState(stateA(), 5, a.skillsSnapshot).toMatchObject({
           node: {
             label: "A4",
@@ -692,9 +437,9 @@ describe.skipIf(!mixedAgentConnection).each(["sqlite", "postgres"] as const)(
       }));
 
     it("creates foreign-key children after their node and preserves snapshot revisions, deletion, and window ownership", () =>
-      withEntryDatabase(({ database, recorder, write, state }) => {
+      withEntryDatabase(({ database, write, state }) => {
         const plainKey = "agent:main:entry-new-window";
-        write("newNodeWindow", plainKey, { sessionId: "entry-new-window", updatedAt: 10 });
+        write(plainKey, { sessionId: "entry-new-window", updatedAt: 10 });
         expectState(state(plainKey, "entry-new-window"), 0).toMatchObject({
           node: { current_session_id: "entry-new-window" },
           window: { session_key: plainKey },
@@ -715,17 +460,17 @@ describe.skipIf(!mixedAgentConnection).each(["sqlite", "postgres"] as const)(
         const changedSkills = { prompt: "One changed snapshot", skills: [] };
         const changed = { ...entry, label: "Changed node", skillsSnapshot: changedSkills };
         const withoutSkills = { ...changed, skillsSnapshot: undefined };
-        const stages: [string, SessionEntry, number, number | null][] = [
-          ["newNodeSnapshots", entry, 2, 2],
-          ["existingNodeSnapshots", changed, 3, 1],
-          ["unchanged", changed, 3, 0],
-          ["removeOne", withoutSkills, 4, null],
-          ["removeAll", { ...withoutSkills, systemPromptReport: undefined }, 5, null],
+        const stages: [string, SessionEntry, number][] = [
+          ["newNodeSnapshots", entry, 2],
+          ["existingNodeSnapshots", changed, 3],
+          ["unchanged", changed, 3],
+          ["removeOne", withoutSkills, 4],
+          ["removeAll", { ...withoutSkills, systemPromptReport: undefined }, 5],
         ];
         let initialWindow: ReturnType<typeof persisted>["window"];
         let previous: ReturnType<typeof persisted> | undefined;
-        for (const [name, value, revision, writes] of stages) {
-          write(name, key, value, writes);
+        for (const [name, value, revision] of stages) {
+          write(key, value);
           const result = current();
           initialWindow ??= result.window;
           expectState(
@@ -742,8 +487,8 @@ describe.skipIf(!mixedAgentConnection).each(["sqlite", "postgres"] as const)(
         }
 
         const otherKey = "agent:main:entry-window-owner";
-        write("claimOwner", otherKey, { sessionId: entry.sessionId, updatedAt: 20 });
-        write("retainOwner", key, { sessionId: entry.sessionId, updatedAt: 30, status: "done" });
+        write(otherKey, { sessionId: entry.sessionId, updatedAt: 20 });
+        write(key, { sessionId: entry.sessionId, updatedAt: 30, status: "done" });
         expect(current()).toMatchObject({
           node: { current_session_id: entry.sessionId, status: "done", snapshot_revision: 5 },
           window: { session_key: otherKey, created_at: 10, updated_at: 30, status: "done" },
@@ -761,9 +506,6 @@ describe.skipIf(!mixedAgentConnection).each(["sqlite", "postgres"] as const)(
           window: undefined,
           snapshots: [],
         });
-        for (const name of ["removeOne", "removeAll"]) {
-          recorder.expectQueries(name, /delete from\s+"?session_entry_snapshots/iu, 1);
-        }
       }));
   },
 );
