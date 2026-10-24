@@ -126,57 +126,105 @@ vi.mock("../../daemon/runtime-hints.js", () => ({
   buildPlatformServiceStartHints: () => ["openclaw node install", "openclaw node start"],
 }));
 
-vi.mock("../../daemon/systemd.js", async () => {
-  const actual =
-    await vi.importActual<typeof import("../../daemon/systemd.js")>("../../daemon/systemd.js");
-  return {
-    ...actual,
-    isSystemdUserServiceAvailable: mocks.isSystemdUserServiceAvailable,
-    resolveSystemdUserServiceAccount: mocks.resolveSystemdUserServiceAccount,
-    readSystemdUserLingerStatus: mocks.readSystemdUserLingerStatus,
-  };
-});
+vi.mock("../../daemon/systemd.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../daemon/systemd.js")>()),
+  isSystemdUserServiceAvailable: mocks.isSystemdUserServiceAvailable,
+  resolveSystemdUserServiceAccount: mocks.resolveSystemdUserServiceAccount,
+  readSystemdUserLingerStatus: mocks.readSystemdUserLingerStatus,
+}));
 
-vi.mock("../../../packages/terminal-core/src/theme.js", async () => {
-  const actual = await vi.importActual<
-    typeof import("../../../packages/terminal-core/src/theme.js")
-  >("../../../packages/terminal-core/src/theme.js");
-  return {
-    ...actual,
-    colorize: (_rich: boolean, _theme: unknown, text: string) => text,
-  };
-});
+vi.mock("../../../packages/terminal-core/src/theme.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../packages/terminal-core/src/theme.js")>()),
+  colorize: (_rich: boolean, _theme: unknown, text: string) => text,
+}));
 
-vi.mock("../daemon-cli/shared.js", async () => {
-  const actual =
-    await vi.importActual<typeof import("../daemon-cli/shared.js")>("../daemon-cli/shared.js");
-  return {
-    ...actual,
-    createCliStatusTextStyles: () => ({
-      rich: false,
-      label: (text: string) => text,
-      accent: (text: string) => text,
-      infoText: (text: string) => text,
-      okText: (text: string) => text,
-      warnText: (text: string) => text,
-      errorText: (text: string) => text,
-    }),
-    formatRuntimeStatus: (runtime: GatewayServiceRuntime | undefined) => runtime?.status ?? "",
-    resolveRuntimeStatusColor: () => "",
-  };
-});
+vi.mock("../daemon-cli/shared.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../daemon-cli/shared.js")>()),
+  createCliStatusTextStyles: () => ({
+    rich: false,
+    label: (text: string) => text,
+    accent: (text: string) => text,
+    infoText: (text: string) => text,
+    okText: (text: string) => text,
+    warnText: (text: string) => text,
+    errorText: (text: string) => text,
+  }),
+  formatRuntimeStatus: (runtime: GatewayServiceRuntime | undefined) => runtime?.status ?? "",
+  resolveRuntimeStatusColor: () => "",
+}));
 
 function installedCommand(): string[] {
-  const args = mocks.service.install.mock.calls[0]?.[0];
-  if (!args) {
+  return installedPlan().programArguments;
+}
+
+function installedPlan() {
+  const plan = mocks.service.install.mock.calls[0]?.[0];
+  if (!plan) {
     throw new Error("Node service was not installed");
   }
-  return args.programArguments;
+  expect(mocks.service.install).toHaveBeenCalledOnce();
+  expect(mocks.runtime.error).not.toHaveBeenCalled();
+  return plan;
 }
 
 function useLinuxPlatform(): void {
   vi.spyOn(process, "platform", "get").mockReturnValue("linux");
 }
+
+function runtimeProbe(bunVersion: string | null) {
+  return {
+    stdout: JSON.stringify({
+      nodeVersion: "26.12.1",
+      bunVersion,
+      sqliteVersion: "3.53.4",
+      sqliteProbe: { available: true, version: "3.53.4", text: true, blob: true, json: true },
+    }),
+    stderr: "",
+  };
+}
+
+function recordedCommand(executable: string): GatewayServiceCommandConfig {
+  return { programArguments: [executable, "/fixture/openclaw.mjs", "node", "run"] };
+}
+
+function runtimePin(runtimePath: string): DaemonRuntimePinSnapshot {
+  return { revision: "prior", stored: true, pin: { runtime: "node", path: runtimePath } };
+}
+
+function lingerWarning(user = "pi") {
+  return `Systemd lingering is disabled for ${user}. The node service will stop when you log out. Run: sudo loginctl enable-linger ${user}`;
+}
+
+const loadedService = {
+  label: "Node service",
+  loaded: true,
+  loadedText: "loaded",
+  notLoadedText: "not loaded",
+};
+
+function expectInstallOutput(
+  json: boolean,
+  result: string,
+  message: unknown,
+  warnings: string[],
+  lines: unknown[],
+) {
+  expect(mocks.runtime.log.mock.calls).toEqual(json ? [] : lines.map((line) => [line]));
+  const payload = {
+    action: "install",
+    ok: true,
+    result,
+    message,
+    service: loadedService,
+    warnings,
+  };
+  expect(mocks.runtime.writeJson.mock.calls).toEqual(json ? [[payload]] : []);
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  pinSnapshotMock.mockReset().mockReturnValue({ revision: "empty", stored: false });
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -189,20 +237,14 @@ describe("runNodeDaemonInstall", () => {
     process.argv = originalArgv;
   });
   beforeEach(() => {
-    vi.clearAllMocks();
-    pinSnapshotMock.mockReset().mockReturnValue({ revision: "empty", stored: false });
     pinMigrationMock.mockReset().mockResolvedValue(undefined);
     vi.stubEnv("OPENCLAW_NIX_MODE", undefined);
     vi.stubEnv("OPENCLAW_WRAPPER", undefined);
-    mocks.runExec.mockReset().mockImplementation(async (executable: string) => ({
-      stdout: JSON.stringify({
-        nodeVersion: "26.12.1",
-        bunVersion: /(?:^|[/\\])bun(?:\.exe)?$/i.test(executable) ? "1.4.3" : null,
-        sqliteVersion: "3.53.4",
-        sqliteProbe: { available: true, version: "3.53.4", text: true, blob: true, json: true },
-      }),
-      stderr: "",
-    }));
+    mocks.runExec
+      .mockReset()
+      .mockImplementation(async (executable: string) =>
+        runtimeProbe(/(?:^|[/\\])bun(?:\.exe)?$/i.test(executable) ? "1.4.3" : null),
+      );
     mocks.service.readCommand.mockReset().mockResolvedValue(null);
     mocks.service.install.mockReset().mockResolvedValue(undefined);
     mocks.service.isLoaded
@@ -221,10 +263,7 @@ describe("runNodeDaemonInstall", () => {
     });
     mocks.isSystemdUserServiceAvailable.mockReset().mockResolvedValue(true);
     mocks.resolveSystemdUserServiceAccount.mockReset().mockReturnValue("pi");
-    mocks.readSystemdUserLingerStatus.mockReset().mockResolvedValue({
-      user: "pi",
-      linger: "no",
-    });
+    mocks.readSystemdUserLingerStatus.mockReset().mockResolvedValue({ user: "pi", linger: "no" });
   });
 
   it("reports pending runtime-pin migration before reading intent or installing", async () => {
@@ -252,23 +291,14 @@ describe("runNodeDaemonInstall", () => {
     async ({ recorded, runtime, probe }) => {
       const recordedPath = `/opt/recorded/bin/${recorded}`;
       if (probe === "unsupported") {
-        mocks.runExec.mockImplementation(async (executable: string) => ({
-          stdout: JSON.stringify({
-            nodeVersion: "26.12.1",
-            bunVersion: executable === recordedPath ? "1.3.0" : null,
-            sqliteVersion: "3.53.4",
-            sqliteProbe: { available: true, version: "3.53.4", text: true, blob: true, json: true },
-          }),
-          stderr: "",
-        }));
+        mocks.runExec.mockImplementation(async (executable: string) =>
+          runtimeProbe(executable === recordedPath ? "1.3.0" : null),
+        );
       }
       mocks.service.isLoaded.mockResolvedValue(true);
-      mocks.service.readCommand.mockResolvedValue({
-        programArguments: [recordedPath, "/fixture/openclaw.mjs", "node", "run"],
-      });
+      mocks.service.readCommand.mockResolvedValue(recordedCommand(recordedPath));
       await runNodeDaemonInstall({ force: true, runtime });
       const retained = runtime === undefined && probe === "supported";
-      expect(mocks.runtime.error).not.toHaveBeenCalled();
       const command = installedCommand();
       if (retained) {
         expect(command[0]).toBe(recordedPath);
@@ -276,7 +306,7 @@ describe("runNodeDaemonInstall", () => {
         expect(command[0]).not.toBe(recordedPath);
         expect(command[0]).toMatch(runtime === "bun" ? /bun(?:\.exe)?$/ : /node(?:\.exe)?$/);
       }
-      expect(mocks.service.install.mock.calls[0]?.[0].runtimePinUpdate).toEqual({
+      expect(installedPlan().runtimePinUpdate).toEqual({
         expected: { revision: "empty", stored: false },
         pin: undefined,
       });
@@ -287,39 +317,25 @@ describe("runNodeDaemonInstall", () => {
     "handles a runtime pin during %s node reinstall",
     async (mode) => {
       const pin = NODE_RUNTIME_PATH;
+      const snapshot = runtimePin(mode === "preserve" ? pin : "/removed/node");
       mocks.service.isLoaded.mockResolvedValueOnce(false).mockResolvedValue(true);
-      mocks.service.readCommand.mockResolvedValue({
-        programArguments: [pin, "/fixture/openclaw.mjs", "node", "run"],
-      });
-      pinSnapshotMock.mockReturnValue({
-        revision: "prior",
-        stored: true,
-        pin: { runtime: "node", path: mode === "preserve" ? pin : "/removed/node" },
-      });
+      mocks.service.readCommand.mockResolvedValue(recordedCommand(pin));
+      pinSnapshotMock.mockReturnValue(snapshot);
       await runNodeDaemonInstall({
         force: true,
         ...(mode === "replace" ? { runtimePath: pin } : {}),
         ...(mode === "reset" ? { runtime: "node" } : {}),
       });
-      expect(mocks.runtime.error).not.toHaveBeenCalled();
       if (mode === "reset") {
         expect(installedCommand()[0]).not.toBe("/removed/node");
         expect(installedCommand()[0]).toMatch(/node(?:\.exe)?$/);
       } else {
         expect(installedCommand()[0]).toBe(pin);
       }
-      expect(installedCommand()).toEqual(
-        expect.arrayContaining(["--tls", "--tls-fingerprint", TLS_FINGERPRINT]),
-      );
-      expect(mocks.service.install.mock.calls[0]?.[0].runtimePinUpdate).toEqual({
-        expected: {
-          revision: "prior",
-          stored: true,
-          pin: { runtime: "node", path: mode === "preserve" ? pin : "/removed/node" },
-        },
+      expect(installedPlan().runtimePinUpdate).toEqual({
+        expected: runtimePin(mode === "preserve" ? pin : "/removed/node"),
         pin: mode === "reset" ? undefined : { runtime: "node", path: pin },
       });
-      expect(mocks.service.install).toHaveBeenCalledOnce();
     },
   );
 
@@ -330,51 +346,31 @@ describe("runNodeDaemonInstall", () => {
       mocks.service.isLoaded.mockResolvedValue(true);
       mocks.service.readCommand.mockResolvedValue({
         programArguments: ["/override/wrapper", "node", "run"],
-        environment: {
-          OPENCLAW_WRAPPER: "/override/wrapper",
-        },
+        environment: { OPENCLAW_WRAPPER: "/override/wrapper" },
         managedDefinition: {
           programArguments: ["/managed/wrapper", "node", "run"],
-          environment: {
-            OPENCLAW_WRAPPER: "/managed/wrapper",
-          },
+          environment: { OPENCLAW_WRAPPER: "/managed/wrapper" },
         },
       });
-      pinSnapshotMock.mockReturnValue({
-        revision: "prior",
-        stored: true,
-        pin: { runtime: "node", path: NODE_RUNTIME_PATH },
-      });
+      pinSnapshotMock.mockReturnValue(runtimePin(NODE_RUNTIME_PATH));
       await runNodeDaemonInstall({ force: true });
-      expect(mocks.runtime.error).not.toHaveBeenCalled();
       expect(installedCommand()[0]).toBe(
         wrapper === "" ? NODE_RUNTIME_PATH : path.resolve(wrapper ?? "/managed/wrapper"),
       );
-      expect(installedCommand()).toEqual(
-        expect.arrayContaining(["--tls", "--tls-fingerprint", TLS_FINGERPRINT]),
-      );
-      expect(mocks.service.install.mock.calls[0]?.[0].env.OPENCLAW_WRAPPER).toBe(
-        wrapper ?? "/managed/wrapper",
-      );
-      expect(mocks.service.install).toHaveBeenCalledOnce();
+      expect(installedPlan().env.OPENCLAW_WRAPPER).toBe(wrapper ?? "/managed/wrapper");
     },
   );
 
   it("does not adopt an override-only pin or wrapper into the managed node service", async () => {
-    vi.stubEnv("OPENCLAW_WRAPPER", undefined);
     mocks.service.isLoaded.mockResolvedValue(true);
     mocks.service.readCommand.mockResolvedValue({
       programArguments: ["/override/wrapper", "node", "run"],
-      environment: {
-        OPENCLAW_WRAPPER: "/override/wrapper",
-      },
+      environment: { OPENCLAW_WRAPPER: "/override/wrapper" },
       managedDefinition: { programArguments: ["node", "node", "run"], environment: {} },
     });
     await runNodeDaemonInstall({ force: true });
-    expect(mocks.runtime.error).not.toHaveBeenCalled();
     expect(installedCommand()[0]).not.toBe("/override/wrapper");
-    expect(mocks.service.install.mock.calls[0]?.[0].env.OPENCLAW_WRAPPER).toBeUndefined();
-    expect(mocks.service.install).toHaveBeenCalledOnce();
+    expect(installedPlan().env.OPENCLAW_WRAPPER).toBeUndefined();
   });
 
   it("installs saved TLS and explicit command restrictions", async () => {
@@ -405,7 +401,6 @@ describe("runNodeDaemonInstall", () => {
     await runNodeDaemonInstall({ force: true, allCommands: true });
     expect(installedCommand()).toContain("--all-commands");
     expect(installedCommand()).not.toContain("--commands");
-    expect(mocks.service.install).toHaveBeenCalledOnce();
   });
 
   it.each(["node", "bun"] as const)(
@@ -419,9 +414,7 @@ describe("runNodeDaemonInstall", () => {
       expect(installedCommand()[0]).toBe(runtimePath);
       expect(installedCommand()).toEqual(expect.arrayContaining(["--commands", "fixture.read"]));
       if (process.platform !== "win32") {
-        expect(mocks.service.install.mock.calls[0]?.[0].environment?.PATH?.split(":")[0]).toBe(
-          path.dirname(runtimePath),
-        );
+        expect(installedPlan().environment?.PATH?.split(":")[0]).toBe(path.dirname(runtimePath));
       }
     },
   );
@@ -431,11 +424,11 @@ describe("runNodeDaemonInstall", () => {
       { OPENCLAW_GATEWAY_TOKEN: "node-token", OPENCLAW_GATEWAY_PASSWORD: "node-password" },
       () => runNodeDaemonInstall({ force: true }),
     );
-    const plan = mocks.service.install.mock.calls[0]?.[0];
-    expect(plan?.environment?.OPENCLAW_GATEWAY_TOKEN).toBe("node-token");
-    expect(plan?.environment?.OPENCLAW_GATEWAY_PASSWORD).toBe("node-password");
-    expect(plan?.description).toBe("OpenClaw Node Host");
-    expect(plan?.environmentValueSources).toEqual({
+    const plan = installedPlan();
+    expect(plan.environment?.OPENCLAW_GATEWAY_TOKEN).toBe("node-token");
+    expect(plan.environment?.OPENCLAW_GATEWAY_PASSWORD).toBe("node-password");
+    expect(plan.description).toBe("OpenClaw Node Host");
+    expect(plan.environmentValueSources).toEqual({
       OPENCLAW_GATEWAY_TOKEN: "file",
       OPENCLAW_GATEWAY_PASSWORD: "file", // pragma: allowlist secret
       CF_ACCESS_CLIENT_ID: "file",
@@ -444,14 +437,14 @@ describe("runNodeDaemonInstall", () => {
   });
 
   it.each([
-    {
-      opts: { tls: false, tlsFingerprint: TLS_FINGERPRINT },
-      error: "--no-tls cannot be combined with --tls-fingerprint",
-    },
-    { opts: { tlsFingerprint: "sha256:abc123" }, error: "Invalid TLS fingerprint" },
-    { opts: { port: "abc" }, error: "Invalid --port" },
-    { opts: { runtime: "deno" }, error: 'Invalid --runtime (use "node" or "bun"' },
-  ])("rejects invalid install options $opts before building a plan", async ({ opts, error }) => {
+    [
+      { tls: false, tlsFingerprint: TLS_FINGERPRINT },
+      "--no-tls cannot be combined with --tls-fingerprint",
+    ],
+    [{ tlsFingerprint: "sha256:abc123" }, "Invalid TLS fingerprint"],
+    [{ port: "abc" }, "Invalid --port"],
+    [{ runtime: "deno" }, 'Invalid --runtime (use "node" or "bun"'],
+  ] as const)("rejects invalid install options %j before building a plan", async (opts, error) => {
     await runNodeDaemonInstall({ ...opts, force: true });
     expect(mocks.runtime.error).toHaveBeenCalledWith(expect.stringContaining(error));
     expect(mocks.service.install).not.toHaveBeenCalled();
@@ -481,9 +474,9 @@ describe("runNodeDaemonInstall", () => {
   it.each([false, true])(
     "rejects Nix installs before config or service inspection (json=%s)",
     async (json) => {
-      await withEnvAsync({ OPENCLAW_NIX_MODE: "1" }, async () => {
-        await runNodeDaemonInstall({ json, force: true });
-      });
+      await withEnvAsync({ OPENCLAW_NIX_MODE: "1" }, () =>
+        runNodeDaemonInstall({ json, force: true }),
+      );
 
       const message = "Nix mode detected; service install is disabled.";
       expect(mocks.runtime.exit).toHaveBeenCalledExactlyOnceWith(1);
@@ -504,20 +497,12 @@ describe("runNodeDaemonInstall", () => {
   );
 
   it.each([
-    {
-      restriction: "external Gateway supervision",
-      env: { OPENCLAW_SUPERVISOR_MODE: "external" },
-    },
-    {
-      restriction: "noncanonical Gateway state",
-      env: { OPENCLAW_STATE_DIR: "/tmp/openclaw-node-custom-state" },
-    },
-  ])("does not apply $restriction to Node installation", async ({ env }) => {
+    ["external Gateway supervision", { OPENCLAW_SUPERVISOR_MODE: "external" }],
+    ["noncanonical Gateway state", { OPENCLAW_STATE_DIR: "/tmp/openclaw-node-custom-state" }],
+  ] as const)("does not apply %s to Node installation", async (_restriction, env) => {
     mocks.service.isLoaded.mockResolvedValueOnce(false).mockResolvedValue(true);
 
-    await withEnvAsync(env, async () => {
-      await runNodeDaemonInstall({ json: true });
-    });
+    await withEnvAsync(env, () => runNodeDaemonInstall({ json: true }));
 
     expect(mocks.service.install).toHaveBeenCalledOnce();
     expect(mocks.runtime.writeJson).toHaveBeenCalledExactlyOnceWith(
@@ -584,48 +569,19 @@ describe("runNodeDaemonInstall", () => {
       });
       await runNodeDaemonInstall({ force: true, json });
 
-      expect(mocks.resolveSystemdUserServiceAccount).toHaveBeenCalledOnce();
-      expect(mocks.resolveSystemdUserServiceAccount.mock.calls[0]?.[0] === process.env).toBe(true);
-      expect(mocks.readSystemdUserLingerStatus).toHaveBeenCalledOnce();
-      const lingerOptions = mocks.readSystemdUserLingerStatus.mock.calls[0]?.[0];
-      expect(lingerOptions?.env === process.env).toBe(true);
-      expect(lingerOptions?.user).toBe("debian");
-      const warnings = [
-        "",
-        "repeat",
-        "repeat",
-        "native warning",
-        "Systemd lingering is disabled for debian. The node service will stop when you log out. Run: sudo loginctl enable-linger debian",
-      ];
-      expect(mocks.runtime.log.mock.calls).toEqual(
-        json
-          ? []
-          : [
-              [""],
-              ["repeat"],
-              ["repeat"],
-              [expect.stringContaining("Service command:")],
-              ["native warning"],
-              [warnings[4]],
-            ],
-      );
-      if (json) {
-        expect(mocks.runtime.writeJson).toHaveBeenCalledExactlyOnceWith({
-          action: "install",
-          ok: true,
-          result: "installed",
-          warnings,
-          message: expect.stringContaining("Service command:"),
-          service: {
-            label: "Node service",
-            loaded: true,
-            loadedText: "loaded",
-            notLoadedText: "not loaded",
-          },
-        });
-      } else {
-        expect(mocks.runtime.writeJson).not.toHaveBeenCalled();
-      }
+      expect(mocks.resolveSystemdUserServiceAccount.mock.calls).toEqual([[process.env]]);
+      expect(mocks.readSystemdUserLingerStatus.mock.calls).toEqual([
+        [{ env: process.env, user: "debian" }],
+      ]);
+      expect(mocks.resolveSystemdUserServiceAccount.mock.calls[0]?.[0]).toBe(process.env);
+      expect(mocks.readSystemdUserLingerStatus.mock.calls[0]?.[0]?.env).toBe(process.env);
+      const warnings = ["", "repeat", "repeat", "native warning", lingerWarning("debian")];
+      const message = expect.stringContaining("Service command:");
+      expectInstallOutput(json, "installed", message, warnings, [
+        ...warnings.slice(0, 3),
+        message,
+        ...warnings.slice(3),
+      ]);
       expect(mocks.runtime.error).not.toHaveBeenCalled();
       expect(mocks.runtime.exit).not.toHaveBeenCalled();
       expect(mocks.service.install).toHaveBeenCalledOnce();
@@ -638,30 +594,14 @@ describe("runNodeDaemonInstall", () => {
       useLinuxPlatform();
       mocks.service.isLoaded.mockResolvedValue(true);
       await runNodeDaemonInstall({ json });
-      const warning =
-        "Systemd lingering is disabled for pi. The node service will stop when you log out. Run: sudo loginctl enable-linger pi";
+      const warning = lingerWarning();
       const message = "Node service already loaded.";
-      expect(mocks.runtime.log.mock.calls).toEqual(
-        json ? [] : [[warning], [message], ["Reinstall with: openclaw node install --force"]],
-      );
-      expect(mocks.runtime.writeJson.mock.calls.map(([value]) => JSON.stringify(value))).toEqual(
-        json
-          ? [
-              JSON.stringify({
-                action: "install",
-                ok: true,
-                result: "already-installed",
-                message,
-                service: {
-                  label: "Node service",
-                  loaded: true,
-                  loadedText: "loaded",
-                  notLoadedText: "not loaded",
-                },
-                warnings: [warning],
-              }),
-            ]
-          : [],
+      expectInstallOutput(
+        json,
+        "already-installed",
+        message,
+        [warning],
+        [warning, message, "Reinstall with: openclaw node install --force"],
       );
       expect(mocks.service.install).not.toHaveBeenCalled();
     },
@@ -669,42 +609,18 @@ describe("runNodeDaemonInstall", () => {
 });
 
 describe("node daemon lifecycle adapters", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    pinSnapshotMock.mockReset().mockReturnValue({ revision: "empty", stored: false });
-    mocks.runServiceRestart.mockReset();
-    mocks.runServiceStart.mockReset();
-    mocks.runServiceStop.mockReset();
-    mocks.runServiceUninstall.mockReset();
-  });
-
   it.each([
-    {
-      name: "start",
-      delegate: mocks.runServiceStart,
-      expected: { renderStartHints: expect.any(Function) },
-    },
-    {
-      name: "stop",
-      delegate: mocks.runServiceStop,
-      expected: {},
-    },
-    {
-      name: "restart",
-      delegate: mocks.runServiceRestart,
-      expected: { renderStartHints: expect.any(Function) },
-    },
-    {
-      name: "uninstall",
-      delegate: mocks.runServiceUninstall,
-      expected: {
-        stopBeforeUninstall: false,
-        assertNotLoadedAfterUninstall: false,
-      },
-    },
+    ["start", mocks.runServiceStart, { renderStartHints: expect.any(Function) }],
+    ["stop", mocks.runServiceStop, {}],
+    ["restart", mocks.runServiceRestart, { renderStartHints: expect.any(Function) }],
+    [
+      "uninstall",
+      mocks.runServiceUninstall,
+      { stopBeforeUninstall: false, assertNotLoadedAfterUninstall: false },
+    ],
   ] as const)(
-    "delegates $name with node-specific service options",
-    async ({ name, delegate, expected }) => {
+    "delegates %s with node-specific service options",
+    async (name, delegate, expected) => {
       await runNodeDaemonLifecycle(name, { json: true });
 
       expect(delegate).toHaveBeenCalledWith(
@@ -729,8 +645,6 @@ describe("runNodeDaemonStatus", () => {
   }
 
   beforeEach(() => {
-    vi.clearAllMocks();
-    pinSnapshotMock.mockReset().mockReturnValue({ revision: "empty", stored: false });
     mocks.service.isLoaded.mockReset().mockResolvedValue(true);
     mocks.service.readCommand.mockReset().mockResolvedValue(null);
     mocks.service.readRuntime.mockReset().mockResolvedValue({ status: "running" });
