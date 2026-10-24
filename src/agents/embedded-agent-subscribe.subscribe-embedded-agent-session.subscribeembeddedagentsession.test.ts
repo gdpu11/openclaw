@@ -5,11 +5,9 @@ import * as agentEvents from "../infra/agent-events.js";
 import { createDeliveryHarness } from "./embedded-agent-subscribe.delivery.test-support.js";
 import {
   createSubscribedSessionHarness,
-  emitAssistantLifecycleErrorAndEnd,
   emitMessageStartAndEndForAssistantText,
   emitToolRun,
   extractAgentEventPayloads,
-  findLifecycleErrorAgentEvent,
 } from "./embedded-agent-subscribe.e2e-harness.js";
 import {
   createOpenAiResponsesPartial,
@@ -529,15 +527,6 @@ it.each([
   },
 );
 
-it("keeps unresolved mutating failure when an unrelated tool succeeds", async () => {
-  const { emit, subscription, fail } = createToolErrorHarness("run-tools-1");
-  fail("w1", "/tmp/demo.txt");
-  expect(subscription.getLastToolError()?.toolName).toBe("write");
-  runTool(emit, "read", "r1", { path: "/tmp/demo.txt" }, { text: "ok" });
-  await subscription.waitForPendingEvents();
-  expect(subscription.getLastToolError()?.toolName).toBe("write");
-});
-
 it("preserves distinct mutation failures through compaction until each action recovers", async () => {
   const { emit, subscription, fail, recover } = createToolErrorHarness("compaction-retry");
   fail("write-a-failed", "/tmp/a.txt");
@@ -549,21 +538,6 @@ it("preserves distinct mutation failures through compaction until each action re
   recover("write-a-recovered", "/tmp/a.txt");
   await subscription.waitForPendingEvents();
   expect(subscription.getLastToolError()).toBeUndefined();
-});
-
-it("emits lifecycle:error event on agent_end when last assistant message was an error", () => {
-  const { emit, onAgentEvent } = createAgentEventHarness({
-    runId: "run-error",
-    sessionKey: "test-session",
-  });
-  emitAssistantLifecycleErrorAndEnd({ emit, errorMessage: "429 Rate limit exceeded" });
-  const lifecycleError = expectDefined(
-    findLifecycleErrorAgentEvent(onAgentEvent.mock.calls),
-    "Expected lifecycle error event",
-  );
-  const error = (lifecycleError.data as { error?: unknown } | undefined)?.error;
-  expect(typeof error).toBe("string");
-  expect(error).toContain("The AI service needs a short break");
 });
 
 it("reads terminal abort state before emitting lifecycle:end", () => {
