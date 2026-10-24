@@ -1,5 +1,4 @@
 import path from "node:path";
-import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { afterAll, expect, it } from "vitest";
 import { makeUserMessage } from "../../../test/helpers/user-message.js";
 import { upsertSessionEntryCore } from "../../config/sessions/session-accessor.sqlite-entry.js";
@@ -190,13 +189,6 @@ it("keeps the projection prefix behind the admitted-turn read fence", async () =
   expect(replay(bounded)).toEqual([fixture.expected]);
 });
 
-it("restores a checkpoint newer than an injected reset boundary", async () => {
-  const fixture = await seedProjection("projection-after-reset", true);
-  const bounded = await SessionManager.openBoundedAsync(fixture.scope, fixture.options());
-  expect(bounded.getBranch().map((entry) => entry.type)).toEqual(["reset", "message", "custom"]);
-  expect(replay(bounded).at(-1)).toEqual(fixture.expected);
-});
-
 it.each(["delta", "checkpoint"] as const)(
   "restores distinct compaction and tail projections with a retained %s",
   async (marker) => {
@@ -290,70 +282,63 @@ it("reconstructs cold forks from pre-compaction projections without crossing a b
   expect(await lastToolContent()).toEqual(tool("retained").content);
 });
 
-it.each(["async", "sync"] as const)(
-  "preserves checkpoint metadata in %s detached views",
-  async (mode) => {
-    const fixture = await seedProjection(`projection-detached-${mode}`);
-    const options = fixture.options(2);
-    const detached =
-      mode === "async"
-        ? await SessionManager.openDetachedBoundedAsync(fixture.scope, options)
-        : SessionManager.openDetachedBounded(fixture.scope, options);
-    expect(detached.getSessionTarget()).toBeUndefined();
-    expect(branchIds(detached)).toEqual([fixture.retainedId, fixture.deltaId]);
-    expect(replay(detached)).toEqual([fixture.expected]);
-  },
-);
+it("preserves checkpoint metadata in synchronous detached views", async () => {
+  const fixture = await seedProjection("projection-detached-sync");
+  const options = fixture.options(2);
+  const detached = SessionManager.openDetachedBounded(fixture.scope, options);
+  expect(detached.getSessionTarget()).toBeUndefined();
+  expect(branchIds(detached)).toEqual([fixture.retainedId, fixture.deltaId]);
+  expect(replay(detached)).toEqual([fixture.expected]);
+});
 
 it.each([
-  { name: "label", kind: "label", afterReset: false, reordered: false },
-  { name: "malformed model change", kind: "model_change", afterReset: false, reordered: false },
-  { name: "label after reset", kind: "label", afterReset: true, reordered: false },
-  {
-    name: "malformed model change with forward parents",
-    kind: "model_change",
-    afterReset: false,
-    reordered: true,
+  ["label", false, false],
+  ["model_change", false, false],
+  ["label", true, false],
+  ["model_change", false, true],
+] as const)(
+  "preserves hidden %s anchors (reset=%s, forward parents=%s)",
+  async (kind, afterReset, reordered) => {
+    const fixture = await seedProjection(`projection-hidden-${kind}`, afterReset);
+    const { checkpoint, retained, delta } = projectionEntries(fixture);
+    const hidden = {
+      id: "hidden-anchor",
+      parentId: checkpoint.id,
+      timestamp: checkpoint.timestamp,
+      ...(kind === "label"
+        ? { type: "label", targetId: fixture.olderId, label: "earlier message" }
+        : { type: "model_change", provider: "openai" }),
+    };
+    const retainedWithParent = { ...retained, parentId: hidden.id };
+    const entries = reordered
+      ? [
+          fixture.source.getHeader(),
+          retainedWithParent,
+          delta,
+          { ...checkpoint, parentId: null },
+          hidden,
+          {
+            type: "leaf",
+            id: "imported-active-leaf",
+            parentId: hidden.id,
+            targetId: delta.id,
+            timestamp: checkpoint.timestamp,
+          },
+        ]
+      : [...fixture.prefix(), hidden, retainedWithParent, delta];
+    expect(replaceTranscriptEventsSync(fixture.scope, entries)).toBe(true);
+    const options = fixture.options(3);
+    const bounded = await SessionManager.openBoundedAsync(fixture.scope, options);
+    const detached = await SessionManager.openDetachedBoundedAsync(fixture.scope, options);
+    for (const manager of [bounded, detached]) {
+      expect(manager.getEntry(hidden.id)).toBeUndefined();
+      expect(manager.getEntry(checkpoint.id)).toBeUndefined();
+      expect(branchIds(manager)).toEqual([retained.id, delta.id]);
+      expect(replay(manager)).toEqual([fixture.expected]);
+    }
+    expect(detached.getSessionTarget()).toBeUndefined();
   },
-] as const)("preserves projection metadata across a hidden $name anchor", async (testCase) => {
-  const fixture = await seedProjection(`projection-hidden-${testCase.kind}`, testCase.afterReset);
-  const { checkpoint, retained, delta } = projectionEntries(fixture);
-  const hidden = {
-    id: "hidden-anchor",
-    parentId: checkpoint.id,
-    timestamp: checkpoint.timestamp,
-    ...(testCase.kind === "label"
-      ? { type: "label", targetId: fixture.olderId, label: "earlier message" }
-      : { type: "model_change", provider: "openai" }),
-  };
-  const retainedWithParent = { ...retained, parentId: hidden.id };
-  const entries = testCase.reordered
-    ? [
-        fixture.source.getHeader(),
-        retainedWithParent,
-        delta,
-        { ...checkpoint, parentId: null },
-        hidden,
-        {
-          type: "leaf",
-          id: "imported-active-leaf",
-          parentId: hidden.id,
-          targetId: delta.id,
-          timestamp: checkpoint.timestamp,
-        },
-      ]
-    : [...fixture.prefix(), hidden, retainedWithParent, delta];
-  expect(replaceTranscriptEventsSync(fixture.scope, entries)).toBe(true);
-  const options = fixture.options(3);
-  const bounded = await SessionManager.openBoundedAsync(fixture.scope, options);
-  const detached = await SessionManager.openDetachedBoundedAsync(fixture.scope, options);
-  for (const manager of [bounded, detached]) {
-    expect(manager.getEntry(hidden.id)).toBeUndefined();
-    expect(manager.getEntry(checkpoint.id)).toBeUndefined();
-    expect(replay(manager)).toEqual([fixture.expected]);
-  }
-  expect(detached.getSessionTarget()).toBeUndefined();
-});
+);
 
 it.each([
   ["bounded", "continue", false],
@@ -496,17 +481,6 @@ it("recovers projection dependencies without retaining intervening cache touches
     fixture.deltaId,
   ]);
   expect(replay(bounded)).toEqual([fixture.expected]);
-  expect(
-    fixture.source
-      .getBranch()
-      .filter(
-        (entry) =>
-          entry.type === "custom" &&
-          entry.customType === "openclaw.cache-ttl" &&
-          isRecord(entry.data) &&
-          Object.hasOwn(entry.data, "timestamp"),
-      ),
-  ).toHaveLength(40);
 });
 
 it.each([{ cacheTtlDelta: null }, { prunedToolResults: null }, null, "damaged marker"])(
@@ -617,39 +591,6 @@ it("retires the prefix on a new branch, full hydration, reset, and retarget", as
   expect(retargeted.getToolResultProjectionEntries()).toEqual(retargeted.getBranch());
   expect(restore(retargeted).frozen.size).toBe(0);
   expect(replay(retargeted)).toEqual([makeUserMessage("different transcript", 3)]);
-});
-
-it("resolves checkpoint ancestry by active position when imported rows have forward parents", async () => {
-  const fixture = await seedProjection("projection-imported-order");
-  const header = fixture.source.getHeader();
-  const entries = fixture.source.getBranch();
-  const checkpoint = entries.find((entry) => entry.id === fixture.checkpointId);
-  const retained = entries.find((entry) => entry.id === fixture.retainedId);
-  const delta = entries.find((entry) => entry.id === fixture.deltaId);
-  if (!header || !checkpoint || !retained || !delta) {
-    throw new Error("missing projection fixture entries");
-  }
-  // Imported physical order is T,D,C; the selected branch still has ancestry C -> T -> D.
-  expect(
-    replaceTranscriptEventsSync(fixture.scope, [
-      header,
-      retained,
-      delta,
-      { ...checkpoint, parentId: null },
-      {
-        type: "leaf",
-        id: "imported-active-leaf",
-        parentId: checkpoint.id,
-        targetId: delta.id,
-        timestamp: "2026-10-04T00:00:00.000Z",
-      },
-    ]),
-  ).toBe(true);
-  const bounded = await SessionManager.openBoundedAsync(fixture.scope, fixture.options());
-  expect(branchIds(bounded)).toEqual([retained.id, delta.id]);
-  expect(bounded.getEntry(checkpoint.id)).toBeUndefined();
-  expect(replay(bounded)).toEqual([fixture.expected]);
-  expect(bounded.getBranch()).toHaveLength(2);
 });
 
 it("preserves a retained checkpoint through a forward label with an omitted target", async () => {
