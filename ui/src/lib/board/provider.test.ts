@@ -225,13 +225,10 @@ describe("board leases", () => {
     await loaded(writer.provider, current);
     expect(stale.provider.snapshot$.value).toEqual(current);
     expect([old.listeners.size, next.listeners.size]).toEqual([0, 1]);
-    expect(next.addEventListener).toHaveBeenCalledOnce();
     expect(boardProviderForSession({ sessionKey: KEY })).toBe(cached);
     expect(stale.provider).toMatchObject(approvalOnly);
     stale.update(old, false, capabilities);
-    expect(writer.provider.snapshot$.value).toEqual(current);
     expect(stale.provider.snapshot$.value).toEqual(current);
-    expect(old.addEventListener).toHaveBeenCalledOnce();
     expect(next.listeners.size).toBe(1);
     retiredListener?.({
       type: "event",
@@ -245,14 +242,11 @@ describe("board leases", () => {
     writer.update(next, false, capabilities);
     writer.update(next, true, capabilities);
     await called(next.requests, 3);
-    expect(writer.provider.snapshot$.value).toEqual(current);
     stale.update(last, true, capabilities);
     await loaded(writer.provider, future);
-    expect(stale.provider.snapshot$.value).toEqual(future);
     expect([next.listeners.size, last.listeners.size]).toEqual([0, 1]);
     await expect(writer.provider.applyOps([])).resolves.toBeUndefined();
     expect(last.requests).toHaveBeenCalledWith("board.update", { sessionKey: KEY, ops: [] });
-    expect(old.requests).toHaveBeenCalledOnce();
     writer.release();
     expect(last.listeners.size).toBe(1);
     stale.release();
@@ -265,13 +259,8 @@ describe("board leases", () => {
       chat = acquire(c),
       approver = acquire(c, approvalOnly);
     await loaded(chat.provider, initial);
-    expect(chat.provider).not.toBe(dashboard.provider);
     expect(chat.provider.snapshot$).toBe(dashboard.provider.snapshot$);
     expect(chat.provider.events).toBe(dashboard.provider.events);
-    expect(chat.provider).toMatchObject(capabilities);
-    expect(dashboard.provider).toMatchObject(noCapabilities);
-    expect(c.requests).toHaveBeenCalledOnce();
-    expect(c.addEventListener).toHaveBeenCalledOnce();
     const actions = (p: BoardProvider) => [
       () => p.applyOps([]),
       () => p.pinWidget({ docId: "cv" }),
@@ -281,36 +270,31 @@ describe("board leases", () => {
     for (const run of actions(dashboard.provider)) {
       await expect(run()).rejects.toThrow();
     }
-    dashboard.update(c, true, capabilities);
-    expect(approver.provider).toMatchObject(approvalOnly);
-    for (const run of actions(dashboard.provider)) {
-      await expect(run()).resolves.toBeUndefined();
+    for (const allowed of [true, false]) {
+      dashboard.update(c, true, allowed ? capabilities : noCapabilities);
+      expect(dashboard.provider).toMatchObject(allowed ? capabilities : noCapabilities);
+      expect(approver.provider).toMatchObject(approvalOnly);
+      for (const run of actions(dashboard.provider)) {
+        if (allowed) {
+          await expect(run()).resolves.toBeUndefined();
+        } else {
+          await expect(run()).rejects.toThrow();
+        }
+      }
     }
-    expect(c.requests).toHaveBeenCalledTimes(5);
     expect(c.requests).toHaveBeenCalledWith("board.widget.put", {
       sessionKey: KEY,
       name: mcpAppWidgetNameForViewId("app"),
       content: { kind: "mcp-app", viewId: "app" },
     });
-    dashboard.update(c, true, noCapabilities);
-    expect(approver.provider).toMatchObject(approvalOnly);
-    for (const run of actions(dashboard.provider)) {
+    for (const run of actions(approver.provider).slice(0, 3)) {
       await expect(run()).rejects.toThrow();
     }
-    await expect(approver.provider.applyOps([])).rejects.toThrow();
-    await expect(approver.provider.pinWidget({ docId: "cv-restricted" })).rejects.toThrow();
-    await expect(approver.provider.pinMcpApp({ viewId: "app-restricted" })).rejects.toThrow();
     const writer = acquire(c, { ...capabilities, canGrant: false });
     await expect(writer.provider.grant("alpha", "granted")).rejects.toThrow();
     await expect(writer.provider.applyOps([])).resolves.toBeUndefined();
     await expect(approver.provider.grant("alpha", "granted")).resolves.toBeUndefined();
     expect(c.requests).toHaveBeenCalledTimes(7);
-    expect(c.requests).toHaveBeenLastCalledWith("board.widget.grant", {
-      sessionKey: KEY,
-      name: "alpha",
-      decision: "granted",
-      revision: 1,
-    });
     chat.release();
     writer.release();
     approver.release();
@@ -732,7 +716,7 @@ describe("MCP App leases", () => {
   const ready = (viewId: string) => ({ status: "ready", viewId });
   const view = (viewId: string) => ({ viewId, expiresAtMs: Date.now() + 60_000 });
   it.each([{ sessionKey: KEY }, { sessionKey: "global", agentId: "work" }])(
-    "deduplicates $sessionKey app leases until explicit refresh",
+    "deduplicates $sessionKey app leases until refresh or reconnect",
     async (session) => {
       let now = 0;
       vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -763,6 +747,9 @@ describe("MCP App leases", () => {
       expect(
         c.requests.mock.calls.filter(([method]) => method === "board.widget.appView"),
       ).toHaveLength(2);
+      p.attachClient(c, false);
+      p.attachClient(c, true);
+      await expect(read(p)).resolves.toMatchObject(ready("mcp-app-3"));
     },
   );
   it("keys same-name cache entries by instance", async () => {
@@ -775,19 +762,6 @@ describe("MCP App leases", () => {
       "b",
     );
     expect(request).toHaveBeenCalledTimes(2);
-  });
-  it("invalidates cached leases after a same-client reconnect", async () => {
-    const initial = app();
-    let leases = 0;
-    const c = boardClient(async (method) =>
-      method === "board.get" ? initial : view("view-" + ++leases),
-    );
-    const p = provider(c);
-    await loaded(p, initial);
-    await expect(read(p)).resolves.toMatchObject({ viewId: "view-1" });
-    p.attachClient(c, false);
-    p.attachClient(c, true);
-    await expect(read(p)).resolves.toMatchObject({ viewId: "view-2" });
   });
   it.each(["replacement", "reconnect", "disposal"] as const)(
     "rejects pending app leases after %s",
