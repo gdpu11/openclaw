@@ -71,7 +71,12 @@ function button(id: string) {
 }
 
 const ready = (id: string, disabled?: boolean) =>
-  settle(() => expect(button(id)).toMatchObject(disabled === undefined ? {} : { disabled }));
+  settle(() => {
+    expect(button(id)).not.toBeNull();
+    if (disabled !== undefined) {
+      expect(button(id)?.disabled).toBe(disabled);
+    }
+  });
 
 async function openImport(rollback = false) {
   const trigger = rollback ? "backfill-rollback" : "import-provider-button";

@@ -27,12 +27,13 @@ function createRunnerSelection(): RunnerSelection {
 }
 
 function query(root: HTMLElement) {
-  return <T extends HTMLElement = HTMLElement>(selector: string) =>
-    root.querySelector<T>(selector)!;
+  return (selector: string) => root.querySelector<HTMLElement>(selector)!;
 }
 
 function setValue(root: HTMLElement, selector: string, value: string, event = "change") {
-  const input = query(root)<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(selector);
+  const input = root.querySelector<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
+    selector,
+  )!;
   input.value = value;
   input.dispatchEvent(new Event(event, { bubbles: true }));
 }
@@ -55,18 +56,18 @@ it("keeps capture actions from releasing another pending action's busy state", a
     $("[data-copy-text]").click();
     $("#capture-purge-all").click();
     await vi.advanceTimersByTimeAsync(0);
-    expect($<HTMLButtonElement>('[data-action="refresh"]').disabled).toBe(true);
+    expect(root.querySelector<HTMLButtonElement>('[data-action="refresh"]')!.disabled).toBe(true);
     expect(writeText).not.toHaveBeenCalled();
     expect(confirm).not.toHaveBeenCalled();
     expect(httpMock.postJson).toHaveBeenCalledExactlyOnceWith("/api/reset", {});
     reset.resolve();
     await vi.advanceTimersByTimeAsync(0);
-    expect($<HTMLButtonElement>('[data-action="refresh"]').disabled).toBe(false);
+    expect(root.querySelector<HTMLButtonElement>('[data-action="refresh"]')!.disabled).toBe(false);
     $("[data-copy-text]").click();
     await vi.advanceTimersByTimeAsync(0);
     expect(writeText).toHaveBeenCalledExactlyOnceWith("pnpm proxy:start --port 7799");
     expect($(".header-status .badge-fail").textContent).toBe("Clipboard permission denied");
-    expect($<HTMLButtonElement>('[data-action="refresh"]').disabled).toBe(false);
+    expect(root.querySelector<HTMLButtonElement>('[data-action="refresh"]')!.disabled).toBe(false);
   } finally {
     reset.resolve();
   }
@@ -86,7 +87,7 @@ it.each([
   await vi.advanceTimersByTimeAsync(0);
   expect(httpMock.postJson).toHaveBeenCalledExactlyOnceWith(`/api/capture/${endpoint}`, body);
   expect($(".header-status .badge-fail").textContent).toBe("Capture deletion failed");
-  const selected = $<HTMLSelectElement>("#capture-session").selectedOptions;
+  const selected = root.querySelector<HTMLSelectElement>("#capture-session")!.selectedOptions;
   expect([...selected].map((option) => option.value)).toEqual(["capture-1"]);
 });
 
@@ -133,7 +134,7 @@ it.each([
     const root = await mountRunner(createRunnerSelection());
     const $ = query(root);
     $('[data-tab="report"]').click();
-    const tab = $<HTMLButtonElement>('[data-tab="capture"]');
+    const tab = root.querySelector<HTMLButtonElement>('[data-tab="capture"]')!;
     const nav = tab.parentElement!;
     const main = nav.parentElement!;
     vi.spyOn(nav, "getBoundingClientRect").mockReturnValue(
@@ -336,7 +337,7 @@ it("submits channel, profile, explicit-scenario and live-provider configuration 
   $("[data-scenario-toggle-id='dm-chat-baseline']").click();
   $("[data-scenario-toggle-id='browser-talk-start-stop']").click();
   httpMock.postJson.mockClear();
-  const runButton = $<HTMLButtonElement>("[data-action='run-suite']");
+  const runButton = root.querySelector<HTMLButtonElement>("[data-action='run-suite']")!;
   expect(runButton.disabled).toBe(true);
   expect(runButton.textContent).toContain("Run 0 scenarios");
   runButton.click();
@@ -548,7 +549,9 @@ it.each(["tab", "outside", "input", "composer", "select"] as const)(
     );
     expect($("#chat-messages").textContent).toContain("new polling message");
     if (isDraft) {
-      expect($<HTMLInputElement>(selector).value).toBe("unfinished draft");
+      expect(root.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector)!.value).toBe(
+        "unfinished draft",
+      );
     }
     if (isTab) {
       $('[data-tab="events"]').click();

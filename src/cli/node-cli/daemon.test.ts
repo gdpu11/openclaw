@@ -69,8 +69,14 @@ vi.mock("../../process/exec.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../process/exec.js")>()),
   runExec: mocks.runExec,
 }));
-vi.mock("../../runtime.js", () => ({ defaultRuntime: mocks.runtime }));
-vi.mock("../../daemon/node-service.js", () => ({ resolveNodeService: () => mocks.service }));
+vi.mock("../../runtime.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../runtime.js")>()),
+  defaultRuntime: mocks.runtime,
+}));
+vi.mock("../../daemon/node-service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../daemon/node-service.js")>()),
+  resolveNodeService: () => mocks.service,
+}));
 vi.mock("../../commands/daemon-install-runtime-warning.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../commands/daemon-install-runtime-warning.js")>()),
   emitNodeRuntimeWarning: mocks.emitNodeRuntimeWarning,
@@ -91,7 +97,10 @@ vi.mock("../../infra/device-identity-async.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../infra/device-identity-async.js")>()),
   loadDeviceIdentityIfPresentAsync: async () => null,
 }));
-vi.mock("../../node-host/config.js", () => ({ loadNodeHostConfig: mocks.loadNodeHostConfig }));
+vi.mock("../../node-host/config.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../node-host/config.js")>()),
+  loadNodeHostConfig: mocks.loadNodeHostConfig,
+}));
 vi.mock("../daemon-cli/lifecycle-core.js", () => ({
   runServiceRestart: mocks.runServiceRestart,
   runServiceStart: mocks.runServiceStart,
