@@ -64,7 +64,14 @@ workers.Worker = class extends NativeWorker {
     });
     const workerId = this.threadId;
     record({ type: "spawn", workerId, script: String(filename), phase: phase() });
-    this.once("exit", (code) => record({ type: "exit", workerId, code, phase: phase() }));
+    const emit = this.emit;
+    // Owners can remove their listeners after a reply, before native exit arrives.
+    this.emit = function (event, ...args) {
+      if (event === "exit") {
+        record({ type: "exit", workerId, code: args[0], phase: phase() });
+      }
+      return Reflect.apply(emit, this, [event, ...args]);
+    };
   }
 };
 syncBuiltinESMExports();
