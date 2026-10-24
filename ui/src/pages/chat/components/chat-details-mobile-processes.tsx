@@ -31,6 +31,7 @@ export type ChatDetailsMobileProcessesProps = {
 /** Two native process rows; the existing host opens the complete collection. */
 export function ChatDetailsMobileProcesses(props: ChatDetailsMobileProcessesProps) {
   const visibleRows = createMemo(() => props.data.rows.slice(0, 2));
+  const hidden = () => props.data.rows.length - visibleRows().length;
   const motion = createKeyedListMotion({
     ids: () => visibleRows().map((row) => row.instanceId),
     scope: () => props.data.presentation.scope(),
@@ -49,9 +50,6 @@ export function ChatDetailsMobileProcesses(props: ChatDetailsMobileProcessesProp
             >
               <h3 class="chat-details-mobile-root__heading">
                 {t("chat.sessionDetails.processes")}
-                <span class="chat-details-mobile-root__count">
-                  {t("chat.processesPanel.runningCount", { count: String(props.data.rows.length) })}
-                </span>
               </h3>
               <div class="chat-details-mobile-root__group">
                 <div class="chat-details-mobile-processes">
@@ -89,7 +87,9 @@ export function ChatDetailsMobileProcesses(props: ChatDetailsMobileProcessesProp
                       onClick={() => props.onOpen?.()}
                     >
                       <span class="chat-details-mobile-root__copy">
-                        {t("chat.processesPanel.viewAll")}
+                        {hidden() > 0
+                          ? t("chat.sessionDetails.showMore", { count: String(hidden()) })
+                          : t("chat.processesPanel.viewAll")}
                       </span>
                     </button>
                   </Show>

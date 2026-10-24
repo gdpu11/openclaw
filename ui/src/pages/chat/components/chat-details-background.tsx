@@ -314,6 +314,8 @@ function DetailsProcesses(
   const processRows = createDetailsProcessesPresentation(
     () => props.processes()?.snapshot.rows ?? [],
   );
+  const visibleRows = createMemo(() => processRows().slice(0, 2));
+  const hidden = () => processRows().length - visibleRows().length;
   const processError = () =>
     props.processes()?.snapshot.errorKind !== "read" ? props.processes()?.snapshot.error : null;
   const openProcesses = (instanceId?: string) => {
@@ -326,9 +328,6 @@ function DetailsProcesses(
       <details class="chat-details__group" data-details-group="processes" open>
         <summary class="chat-details__caption">
           <span class="chat-details__caption-title">{t("chat.sessionDetails.processes")}</span>
-          <span>
-            {t("chat.processesPanel.runningCount", { count: String(processRows().length) })}
-          </span>
           <Icon name="chevronDown" />
         </summary>
         <Show when={processError()}>
@@ -344,7 +343,7 @@ function DetailsProcesses(
           </div>
         </Show>
         <div role="list" aria-label={t("chat.sessionDetails.processes")}>
-          <For each={processRows().slice(0, 2)} keyed={(row) => row.instanceId}>
+          <For each={visibleRows()} keyed={(row) => row.instanceId}>
             {(row) => (
               <ChatDetailsProcessRow
                 row={row()}
@@ -363,7 +362,9 @@ function DetailsProcesses(
             disabled={!props.presented}
             onClick={() => openProcesses()}
           >
-            {t("chat.processesPanel.viewAll")}
+            {hidden() > 0
+              ? t("chat.sessionDetails.showMore", { count: String(hidden()) })
+              : t("chat.processesPanel.viewAll")}
           </button>
         </Show>
       </details>

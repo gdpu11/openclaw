@@ -283,9 +283,17 @@ suite.define(() => {
                   .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-process-id"))),
               ).toEqual(["dev-server", "watch-tests"]);
               await processGroup
-                .getByRole("button", { name: "View all processes", exact: true })
+                .getByRole("button", {
+                  name: "Show 2 more",
+                  exact: true,
+                })
                 .waitFor();
-              expect(await processGroup.locator("h3").textContent()).toContain("4 running");
+              expect((await processGroup.locator("h3").textContent())?.trim()).toBe("Processes");
+              expect(
+                await processGroup
+                  .locator(".chat-details-mobile-processes__show-all > span")
+                  .evaluate((element) => getComputedStyle(element).fontVariantNumeric),
+              ).toBe("tabular-nums");
               const mobileStop = processGroup.getByRole("button", {
                 name: "Stop Background terminal",
                 exact: true,
@@ -306,10 +314,10 @@ suite.define(() => {
               await processGroup.locator("[data-process-id]").first().waitFor();
               expect(await processGroup.locator("[data-process-id]").count()).toBe(3);
               const heading = processGroup.locator(":scope > summary");
-              expect(await heading.textContent()).toContain("4 running");
+              expect((await heading.textContent())?.trim()).toBe("Processes");
               await heading.click();
               expect(await heading.getAttribute("aria-expanded")).toBe("false");
-              expect(await heading.textContent()).toContain("4 running");
+              expect((await heading.textContent())?.trim()).toBe("Processes");
               await processGroup.locator("[data-process-id]").first().waitFor({ state: "hidden" });
               await heading.click();
               const subagentsBounds = (await details
@@ -433,6 +441,9 @@ suite.define(() => {
                 });
                 await gateway.resolveDeferred("sessions.processes.stop", { requested: true });
                 await first.waitFor({ state: "detached" });
+                await processGroup
+                  .getByRole("button", { name: "View all processes", exact: true })
+                  .waitFor();
                 expect(await first.locator(".chat-details-processes__stop").count()).toBe(0);
                 await page.mouse.move(0, 0);
                 await subagents.locator(":scope > summary").scrollIntoViewIfNeeded();
@@ -572,7 +583,10 @@ suite.define(() => {
             expect(await detailsScroll.evaluate((element) => element.scrollTop)).toBe(beforeTop);
             await page.setViewportSize({ width, height: 1100 });
             await processGroup
-              .getByRole("button", { name: "View all processes", exact: true })
+              .getByRole("button", {
+                name: width === 390 ? "Show 2 more" : "Show 1 more",
+                exact: true,
+              })
               .click();
             await panel.getByRole("button", { name: processes[0]!.name, exact: true }).waitFor();
             await panel.getByRole("button", { name: /Finished/ }).click();

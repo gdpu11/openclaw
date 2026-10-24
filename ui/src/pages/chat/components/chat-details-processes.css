@@ -174,13 +174,9 @@
   background: none;
   color: var(--muted);
   font: inherit;
+  font-variant-numeric: tabular-nums;
   padding: var(--details-row-padding-block, 4px) var(--details-row-padding, 4px);
   cursor: var(--cursor-action);
-}
-
-.chat-details-mobile-root__count {
-  margin-inline-start: 8px;
-  font-variant-numeric: tabular-nums;
 }
 
 .chat-details-processes__envelope {

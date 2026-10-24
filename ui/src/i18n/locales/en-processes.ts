@@ -11,7 +11,6 @@ const catalog = {
       runningDesktop: "Running  {count}",
       finishedDesktop: "Finished  {count}",
       empty: "No background processes in this conversation.",
-      runningCount: "{count} running",
       viewAll: "View all processes",
       openOutput: "Open output",
       cannotStop: "Can’t be stopped",

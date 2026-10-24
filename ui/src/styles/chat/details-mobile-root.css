@@ -414,6 +414,7 @@
   min-height: 36px;
   color: var(--muted);
   font: 400 12px/18px var(--font-body);
+  font-variant-numeric: tabular-nums;
 }
 
 .chat-details-mobile-processes .chat-details__process-icon {

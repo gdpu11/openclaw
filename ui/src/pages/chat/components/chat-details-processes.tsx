@@ -104,6 +104,7 @@ export function ChatDetailsProcesses(props: Props) {
   const snapshot = () => props.processes()?.snapshot;
   const rows = createDetailsProcessesPresentation(() => snapshot()?.rows ?? []);
   const visibleRows = createMemo(() => rows().slice(0, 3));
+  const hidden = () => rows().length - visibleRows().length;
   const [revealing, setRevealing] = createSignal(false);
   const motion = createKeyedListMotion({
     ids: () => visibleRows().map((row) => row.instanceId),
@@ -166,7 +167,9 @@ export function ChatDetailsProcesses(props: Props) {
             disabled={!props.presented}
             onClick={() => open()}
           >
-            {t("chat.processesPanel.viewAll")}
+            {hidden() > 0
+              ? t("chat.sessionDetails.showMore", { count: String(hidden()) })
+              : t("chat.processesPanel.viewAll")}
           </button>
         </div>
       </Show>
@@ -201,11 +204,6 @@ export function ChatDetailsProcesses(props: Props) {
               <ChatDetailsDesktopSection
                 section="processes"
                 title={t("chat.sessionDetails.processes")}
-                metadata={
-                  <span class="chat-details-desktop-section__count">
-                    {t("chat.processesPanel.runningCount", { count: String(rows().length) })}
-                  </span>
-                }
                 expanded={props.expanded}
                 presented={props.presented}
                 onExpandedChange={(expanded) => props.onExpandedChange(expanded)}
