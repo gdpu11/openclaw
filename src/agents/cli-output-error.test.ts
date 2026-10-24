@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { createCliJsonlStreamingParser } from "./cli-output-stream.js";
 import { extractCliErrorMessage, formatCliOutputError, parseCliOutput } from "./cli-output.js";
 import {
+  createGeminiResultErrorFrames,
+  createGeminiBackend,
   createClaudeBackend,
   createPluginParser,
   joinJsonlFrames,
@@ -115,11 +117,7 @@ describe("parseCliJsonl errors", () => {
           error: { message: "Final Gemini failure" },
         },
       ),
-      {
-        command: "gemini",
-        output: "jsonl",
-        jsonlDialect: "gemini-stream-json",
-      },
+      createGeminiBackend(),
       "google-gemini-cli",
     );
 
@@ -148,11 +146,7 @@ describe("parseCliJsonl errors", () => {
           status: "success",
         },
       ),
-      {
-        command: "gemini",
-        output: "jsonl",
-        jsonlDialect: "gemini-stream-json",
-      },
+      createGeminiBackend(),
       "google-gemini-cli",
     );
 
@@ -286,32 +280,12 @@ describe("createCliJsonlStreamingParser errors", () => {
   it("streams Gemini result errors as provider errors", () => {
     const deltas: Array<{ text: string; delta: string; sessionId?: string }> = [];
     const parser = createCliJsonlStreamingParser({
-      backend: {
-        command: "gemini",
-        output: "jsonl",
-        jsonlDialect: "gemini-stream-json",
-      },
+      backend: createGeminiBackend(),
       providerId: "google-gemini-cli",
       onAssistantDelta: (delta) => deltas.push(delta),
     });
 
-    parser.push(
-      joinJsonlFrames(
-        {
-          type: "message",
-          timestamp: "2026-06-16T19:36:47.000Z",
-          role: "assistant",
-          content: "partial output",
-          delta: true,
-        },
-        {
-          type: "result",
-          timestamp: "2026-06-16T19:36:49.000Z",
-          status: "error",
-          error: { message: "Gemini stream failed" },
-        },
-      ) + "\n",
-    );
+    parser.push(joinJsonlFrames(...createGeminiResultErrorFrames()) + "\n");
     parser.finish();
 
     expect(deltas).toEqual([

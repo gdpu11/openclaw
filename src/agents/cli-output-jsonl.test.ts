@@ -3,6 +3,10 @@ import { calculateUsageCost } from "@openclaw/llm-core";
 import { describe, expect, it } from "vitest";
 import { parseCliOutput } from "./cli-output.js";
 import {
+  createGeminiResultErrorFrames,
+  createGeminiBackend,
+  createCumulativeUsageFrames,
+  createGeminiErrorFrames,
   claudeMessageStart,
   claudeStreamEvent,
   claudeTextDelta,
@@ -309,21 +313,7 @@ describe("parseCliJsonl", () => {
     },
     {
       name: "parses Gemini stream-json result errors as provider errors",
-      frames: [
-        {
-          type: "message",
-          timestamp: "2026-06-16T19:36:47.000Z",
-          role: "assistant",
-          content: "partial output",
-          delta: true,
-        },
-        {
-          type: "result",
-          timestamp: "2026-06-16T19:36:49.000Z",
-          status: "error",
-          error: { message: "Gemini stream failed" },
-        },
-      ],
+      frames: createGeminiResultErrorFrames(),
       sessionIdFields: undefined,
       expected: {
         text: "",
@@ -334,20 +324,7 @@ describe("parseCliJsonl", () => {
     },
     {
       name: "keeps detailed Gemini stream-json error events over generic result errors",
-      frames: [
-        {
-          type: "error",
-          timestamp: "2026-06-16T19:36:48.000Z",
-          severity: "error",
-          message: "Invalid stream payload",
-        },
-        {
-          type: "result",
-          timestamp: "2026-06-16T19:36:49.000Z",
-          status: "error",
-          stats: { total_tokens: 1 },
-        },
-      ],
+      frames: createGeminiErrorFrames(),
       sessionIdFields: undefined,
       expected: {
         text: "",
@@ -359,12 +336,7 @@ describe("parseCliJsonl", () => {
   ])("$name", ({ frames, sessionIdFields, expected }) => {
     const result = parseCliJsonl(
       joinJsonlFrames(...frames),
-      {
-        command: "gemini",
-        output: "jsonl",
-        jsonlDialect: "gemini-stream-json",
-        ...(sessionIdFields ? { sessionIdFields } : {}),
-      },
+      { ...createGeminiBackend(), ...(sessionIdFields ? { sessionIdFields } : {}) },
       "google-gemini-cli",
     );
 
@@ -390,7 +362,7 @@ describe("parseCliJsonl", () => {
         ...(final ? [message("Done.")] : []),
         { type: "result", status: "success", stats: { total_tokens: 2 } },
       ),
-      { command: "gemini", output: "jsonl", jsonlDialect: "gemini-stream-json" },
+      createGeminiBackend(),
       "google-gemini-cli",
     );
 
@@ -431,29 +403,7 @@ describe("parseCliJsonl", () => {
 
   it("does not let cumulative Claude result usage overwrite assistant usage", () => {
     const result = parseCliJsonl(
-      joinJsonlFrames(
-        { type: "init", session_id: "session-stream" },
-        {
-          type: "assistant",
-          message: {
-            id: "msg-1",
-            usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 },
-          },
-        },
-        {
-          type: "assistant",
-          message: {
-            id: "msg-2",
-            usage: { input_tokens: 11, output_tokens: 6, cache_read_input_tokens: 125 },
-          },
-        },
-        {
-          type: "result",
-          session_id: "session-stream",
-          result: "done",
-          usage: { input_tokens: 30, output_tokens: 15, cache_read_input_tokens: 300 },
-        },
-      ),
+      joinJsonlFrames(...createCumulativeUsageFrames({ session_id: "session-stream" })),
     );
 
     expect(result?.usage).toEqual({
