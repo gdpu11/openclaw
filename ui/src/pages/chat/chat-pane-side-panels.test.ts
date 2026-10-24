@@ -13,6 +13,7 @@ import {
   connectPaneTestView,
   createGatewayBrowserClientFixture,
   createTestChatPane,
+  getPaneTestRuntime,
 } from "./chat-pane.test-support.ts";
 import type { ChatSessionRailElement } from "./components/chat-session-rail.tsx";
 import {
@@ -237,6 +238,7 @@ it("discards a Details process request after switching agents on the same global
   });
   onTestFinished(() => mount.remove());
   pane.routeFace = "chat";
+  const runtime = getPaneTestRuntime(pane);
   state.assistantAgentId = "main";
   const open = () => {
     const details = pane.render().layout?.header?.header.header.detailsControl?.chat;
@@ -244,12 +246,12 @@ it("discards a Details process request after switching agents on the same global
   };
   open();
   state.assistantAgentId = "research";
-  expect(pane.companionIntents.processesShowRequest?.()).toBeUndefined();
+  expect(runtime.companionIntents.processesShowRequest?.()).toBeUndefined();
 
   open();
-  expect(pane.companionIntents.processesShowRequest?.()).toEqual({
+  expect(runtime.companionIntents.processesShowRequest?.()).toEqual({
     instanceId: "process-main",
     fromDetails: true,
   });
-  expect(pane.companionIntents.processesShowRequest).toBeUndefined();
+  expect(runtime.companionIntents.processesShowRequest).toBeUndefined();
 });
