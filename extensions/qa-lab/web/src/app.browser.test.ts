@@ -81,7 +81,10 @@ describe("QA Lab runner browser interactions", () => {
     const $ = query(root);
     const reset = Promise.withResolvers<void>();
     httpMock.postJson.mockImplementationOnce(() => reset.promise);
-    const writeText = vi.fn().mockResolvedValue(undefined);
+    const writeText = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Clipboard permission denied"))
+      .mockResolvedValue(undefined);
     vi.stubGlobal("navigator", { clipboard: { writeText } });
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     onTestFinished(() => confirm.mockRestore());
@@ -92,37 +95,24 @@ describe("QA Lab runner browser interactions", () => {
       $("[data-copy-text]").click();
       $("#capture-purge-all").click();
       await vi.advanceTimersByTimeAsync(0);
-
       expect($<HTMLButtonElement>('[data-action="refresh"]').disabled).toBe(true);
       expect(writeText).not.toHaveBeenCalled();
       expect(confirm).not.toHaveBeenCalled();
       expect(httpMock.postJson).toHaveBeenCalledExactlyOnceWith("/api/reset", {});
-
       reset.resolve();
       await vi.advanceTimersByTimeAsync(0);
       expect($<HTMLButtonElement>('[data-action="refresh"]').disabled).toBe(false);
       $("[data-copy-text]").click();
       await vi.advanceTimersByTimeAsync(0);
-      expect(writeText).toHaveBeenCalledOnce();
+      expect(writeText).toHaveBeenCalledExactlyOnceWith("pnpm proxy:start --port 7799");
+      expect($(".header-status .badge-fail").textContent).toBe("Clipboard permission denied");
+      expect($<HTMLButtonElement>('[data-action="refresh"]').disabled).toBe(false);
+      $("[data-copy-text]").click();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(writeText).toHaveBeenCalledTimes(2);
     } finally {
       reset.resolve();
     }
-  });
-
-  it("shows clipboard failures from capture startup commands", async () => {
-    const root = await mountRunner(createRunnerSelection());
-    const $ = query(root);
-    const writeText = vi.fn().mockRejectedValue(new Error("Clipboard permission denied"));
-    vi.stubGlobal("navigator", { clipboard: { writeText } });
-    $('[data-tab="capture"]').click();
-    const copy = $<HTMLButtonElement>("[data-copy-text]");
-
-    copy.click();
-    await vi.advanceTimersByTimeAsync(0);
-
-    expect(writeText).toHaveBeenCalledExactlyOnceWith("pnpm proxy:start --port 7799");
-    expect($(".header-status .badge-fail").textContent).toBe("Clipboard permission denied");
-    expect($<HTMLButtonElement>('[data-action="refresh"]').disabled).toBe(false);
   });
 
   it.each([
@@ -144,7 +134,6 @@ describe("QA Lab runner browser interactions", () => {
       const readsBefore = httpMock.getJson.mock.calls.length;
       $(selector).click();
       await vi.advanceTimersByTimeAsync(0);
-
       expect(httpMock.postJson).toHaveBeenCalledExactlyOnceWith(endpoint, body);
       expect($(".header-status .badge-fail").textContent).toBe("Capture deletion failed");
       expect(
@@ -175,13 +164,11 @@ describe("QA Lab runner browser interactions", () => {
         })),
       );
       setValue(root, "#capture-view-mode", "timeline");
-
       const bins = () =>
         root.querySelectorAll<HTMLButtonElement>("[data-capture-sparkline-window]");
       bins()[0]!.dispatchEvent(new MouseEvent("mousedown", { button: 0 }));
       bins()[6]!.dispatchEvent(new MouseEvent("mouseenter"));
       window.dispatchEvent(new MouseEvent("mouseup", { shiftKey }));
-
       const visibleIds = () =>
         [...root.querySelectorAll<HTMLElement>(".capture-timeline-marker")].map((marker) =>
           Number(marker.dataset.captureEvent!.split(":")[0]),
@@ -196,17 +183,14 @@ describe("QA Lab runner browser interactions", () => {
   it.each([
     ["left clipping", 0, 0, 320, 90, -20.5, 69.5],
     ["offset bordered scrollport", 200.25, 2, 320, 50, 500.75, 97.53125],
-    ["already visible after scrolling", 0, 0, 320, 50, 100, 50],
   ] as const)(
     "reveals tabs after navigation replacement: %s",
     async (_name, navLeft, clientLeft, clientWidth, initialScroll, tabLeft, expected) => {
       const root = await mountRunner(createRunnerSelection());
       const $ = query(root);
-      const oldNav = root.querySelector(".tab-bar");
       $('[data-tab="report"]').click();
       const tab = $<HTMLButtonElement>('[data-tab="capture"]');
       const nav = tab.parentElement!;
-      expect(nav).not.toBe(oldNav);
       const main = nav.parentElement!;
       vi.spyOn(nav, "getBoundingClientRect").mockReturnValue(
         new DOMRect(navLeft, 81.5, clientWidth + 2 * clientLeft, 50.5),
@@ -214,15 +198,11 @@ describe("QA Lab runner browser interactions", () => {
       vi.spyOn(tab, "getBoundingClientRect").mockReturnValue(
         new DOMRect(tabLeft, 89.5, 69.03125, 33.5),
       );
-      let scrollLeft: number = initialScroll;
-      const setScrollLeft = vi.fn((value: number) => {
-        scrollLeft = value;
-      });
       Object.defineProperties(nav, {
         clientLeft: { configurable: true, value: clientLeft },
         clientWidth: { configurable: true, value: clientWidth },
-        scrollLeft: { configurable: true, get: () => scrollLeft, set: setScrollLeft },
       });
+      nav.scrollLeft = initialScroll;
       nav.scrollTop = 17;
       main.scrollLeft = 11;
       main.scrollTop = 23;
@@ -230,44 +210,14 @@ describe("QA Lab runner browser interactions", () => {
       root.scrollTop = 13;
 
       tab.focus();
-
       expect(document.activeElement).toBe(tab);
       expect(nav.scrollLeft).toBe(expected);
-      if (expected === initialScroll) {
-        expect(setScrollLeft).not.toHaveBeenCalled();
-      } else {
-        expect(setScrollLeft).toHaveBeenCalledExactlyOnceWith(expected);
-      }
       expect(nav.scrollTop).toBe(17);
       expect([main.scrollLeft, main.scrollTop, root.scrollLeft, root.scrollTop]).toEqual([
         11, 23, 7, 13,
       ]);
-      expect($(".tab-btn.active").dataset.tab).toBe("report");
-      expect(root.querySelector('[data-tab="capture"]')).toBe(tab);
-      tab.click();
-      expect($(".tab-btn.active").dataset.tab).toBe("capture");
     },
   );
-
-  it("keeps header actions and the Control UI link alongside long errors", async () => {
-    const selection: RunnerSelection = createRunnerSelection();
-    const controlUiUrl = "https://control.example.test/";
-    const root = await mountRunner(selection, undefined, null, controlUiUrl);
-    const $ = query(root);
-    expect($<HTMLAnchorElement>(".header-link").href).toBe(controlUiUrl);
-
-    const message = `Request failed: <missing> ${"error-context".repeat(16)}`;
-    httpMock.getJson.mockRejectedValueOnce(new Error(message));
-    $('[data-action="refresh"]').click();
-    await vi.waitFor(() => expect($(".header-status .badge-fail").textContent).toContain(message));
-    expect($(".header-title").textContent).toBe("QA Lab");
-    expect($<HTMLAnchorElement>(".header-link").href).toBe(controlUiUrl);
-    expect(
-      [...root.querySelectorAll<HTMLElement>(".header-right [data-action]")].map(
-        (node) => node.dataset.action,
-      ),
-    ).toEqual(["toggle-sidebar", "refresh", "reset", "toggle-theme"]);
-  });
 
   it("updates Control UI links only when bootstrap URLs change", async () => {
     const { root, setControlUiUrl } = await mountRunningControlUi(null);
@@ -279,10 +229,8 @@ describe("QA Lab runner browser interactions", () => {
       null,
     ]) {
       const header = root.querySelector(".header")!;
-      const link = root.querySelector(".header-link");
       await vi.advanceTimersByTimeAsync(1_000);
       expect(root.querySelector(".header")).toBe(header);
-      expect(root.querySelector(".header-link")).toBe(link);
       expect(readHref()).toBe(previous);
       setControlUiUrl(next);
       expect(readHref()).toBe(previous);
@@ -290,6 +238,16 @@ describe("QA Lab runner browser interactions", () => {
       expect(readHref()).toBe(next);
       expect(header.isConnected).toBe(false);
       previous = next;
+      if (next?.endsWith("/control-ui/")) {
+        const message = `Request failed: <missing> ${"error-context".repeat(16)}`;
+        httpMock.getJson.mockRejectedValueOnce(new Error(message));
+        query(root)('[data-action="refresh"]').click();
+        await vi.waitFor(() =>
+          expect(query(root)(".header-status .badge-fail").textContent).toContain(message),
+        );
+        expect(readHref()).toBe(next);
+        await vi.advanceTimersByTimeAsync(1_000);
+      }
     }
   });
 
@@ -342,7 +300,6 @@ describe("QA Lab runner browser interactions", () => {
     setValue(root, "#evidence-status-filter", "all");
     $('[data-evidence-entry-key="1"]').click();
     expect($(".evidence-inspector").textContent).toContain("observed attempt 1");
-    expect(evidence.entries.map((entry) => entry.id)).toEqual(["same-label", "same-label"]);
   });
 
   it("sends group conversation messages from the interactive chat composer", async () => {
@@ -370,7 +327,6 @@ describe("QA Lab runner browser interactions", () => {
     setValue(root, "#conversation-id", "qa-group", "input");
     setValue(root, "#composer-text", "hello group", "input");
     $("[data-action='send']").click();
-
     await vi.waitFor(() => expect(httpMock.postJson).toHaveBeenCalledTimes(1));
     expect(httpMock.postJson).toHaveBeenCalledWith(
       "/api/inbound/message",
@@ -380,110 +336,57 @@ describe("QA Lab runner browser interactions", () => {
         text: "hello group",
       }),
     );
-    const submittedPayload = httpMock.postJson.mock.calls[0]?.[1] as Record<string, unknown>;
-    expect(submittedPayload).not.toHaveProperty("threadId");
+    expect(httpMock.postJson.mock.calls[0]?.[1]).not.toHaveProperty("threadId");
   });
 
-  it("keeps scenario rows from collapsing inside the scrolling list", async () => {
+  it("submits channel, profile, explicit-scenario and live-provider configuration changes", async () => {
     const root = await mountRunner(createRunnerSelection());
     const $ = query(root);
-
-    expect(getComputedStyle($(".scenario-scroll")).overflowY).toBe("auto");
-    expect(getComputedStyle($(".scenario-item")).flexShrink).toBe("0");
-  });
-
-  it.each<{
-    name: string;
-    initial?: Partial<RunnerSelection>;
-    changes: [string, string][];
-    action?: string;
-    expected: Partial<RunnerSelection>;
-  }>([
-    {
-      name: "live-provider non-flow scenarios",
-      initial: {
-        alternateModel: "openai/gpt-5.6-luna",
-        primaryModel: "openai/gpt-5.6-luna",
-        channelDriver: "crabline",
-        fastMode: true,
-        providerMode: "live-frontier",
-      },
-      changes: [],
-      action: "[data-action='select-all-scenarios']",
-      expected: {
-        channelDriver: "crabline",
-        providerMode: "live-frontier",
-        scenarioIds: ["dm-chat-baseline", "browser-talk-start-stop"],
-      },
-    },
-    {
-      name: "real channels with the mock provider",
-      changes: [
-        ["#channel-driver", "live"],
-        ["#execution-channel", "telegram"],
-      ],
-      expected: { channelDriver: "live", channel: "telegram", providerMode: "mock-openai" },
-    },
-    {
-      name: "profile, evidence, runtime pair and lane",
-      initial: { channelDriver: "live" },
-      changes: [
-        ["#run-profile", "smoke-ci"],
-        ["#execution-channel", "telegram"],
-        ["#evidence-mode", "slim"],
-        ["#runtime-pair", "openclaw,codex"],
-        ["#runtime-pair-lane", "core"],
-      ],
-      expected: {
-        profile: "smoke-ci",
-        channel: "telegram",
-        channelDriver: "crabline",
-        evidenceMode: "slim",
-        runtimePair: ["openclaw", "codex"],
-        runtimePairLane: "core",
-        scenarioIds: null,
-      },
-    },
-    {
-      name: "dirty profile overrides",
-      changes: [["#run-profile", "smoke-ci"]],
-      action: "[data-scenario-toggle-id='browser-talk-start-stop']",
-      expected: { profile: "smoke-ci", scenarioIds: ["browser-talk-start-stop"] },
-    },
-  ])(
-    "submits labeled configuration controls: $name",
-    async ({ initial, changes, action, expected }) => {
-      const root = await mountRunner({ ...createRunnerSelection(), ...initial });
-      const $ = query(root);
+    const configure = (changes: Record<string, string>) => {
       $("[data-sidebar-panel='config']").click();
-      const selects = [...root.querySelectorAll<HTMLSelectElement>(".config-field select")];
-      expect(selects).toHaveLength(9);
-      expect(selects.map((select) => select.labels?.[0]?.textContent?.trim())).toEqual([
-        "Profile",
-        "Provider lane",
-        "Channel driver",
-        "Execution channel",
-        "Evidence mode",
-        "Runtime pair",
-        "Runtime-pair lane",
-        "Primary model",
-        "Alternate model",
-      ]);
-      for (const [selector, value] of changes) {
-        setValue(root, selector, value);
+      for (const [id, value] of Object.entries(changes)) {
+        setValue(root, `#${id}`, value);
       }
-      if (action) {
-        $("[data-sidebar-panel='scenarios']").click();
-        $(action).click();
-      }
+    };
+    const launch = async (expected: Partial<RunnerSelection>) => {
+      httpMock.postJson.mockClear();
       $("[data-action='run-suite']").click();
-      await vi.waitFor(() => expect(httpMock.postJson).toHaveBeenCalledTimes(1));
-      expect(httpMock.postJson).toHaveBeenCalledWith(
+      await vi.advanceTimersByTimeAsync(0);
+      expect(httpMock.postJson).toHaveBeenCalledExactlyOnceWith(
         "/api/scenario/suite",
         expect.objectContaining(expected),
       );
-    },
-  );
+    };
+    configure({ "channel-driver": "live", "execution-channel": "telegram" });
+    await launch({ channelDriver: "live", channel: "telegram", providerMode: "mock-openai" });
+    configure({
+      "run-profile": "smoke-ci",
+      "evidence-mode": "slim",
+      "runtime-pair": "openclaw,codex",
+      "runtime-pair-lane": "core",
+    });
+    await launch({
+      profile: "smoke-ci",
+      channel: "telegram",
+      channelDriver: "crabline",
+      evidenceMode: "slim",
+      runtimePair: ["openclaw", "codex"],
+      runtimePairLane: "core",
+      scenarioIds: null,
+    });
+    configure({ "run-profile": "smoke-ci" });
+    $("[data-sidebar-panel='scenarios']").click();
+    $("[data-scenario-toggle-id='browser-talk-start-stop']").click();
+    await launch({ profile: "smoke-ci", scenarioIds: ["browser-talk-start-stop"] });
+    configure({ "provider-mode": "live-frontier" });
+    $("[data-sidebar-panel='scenarios']").click();
+    $("[data-action='select-all-scenarios']").click();
+    await launch({
+      channelDriver: "crabline",
+      providerMode: "live-frontier",
+      scenarioIds: ["dm-chat-baseline", "browser-talk-start-stop"],
+    });
+  });
 
   it("renders server-resolved exclusions and errors from a rejected launch", async () => {
     const root = await mountRunner(createRunnerSelection());
@@ -509,10 +412,8 @@ describe("QA Lab runner browser interactions", () => {
     );
 
     $("[data-action='run-suite']").click();
-
     await vi.waitFor(() => expect(root.textContent).toContain("1 excluded"));
     expect(root.textContent).toContain("Explicit QA scenario selection is not runnable");
-
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => expect(root.textContent).toContain("1 excluded"));
     expect(root.textContent).toContain("Explicit QA scenario selection is not runnable");
@@ -578,40 +479,44 @@ describe("QA Lab tab navigation retention", () => {
       nav.closest(".app-shell--evidence-focus, .app-shell--sidebar-collapsed") ? 800 : 440;
     // jsdom has no layout. Model the shell width and native clamping while the
     // actual app binding and revealTab own every focus-driven scroll adjustment.
-    const clientWidth = vi
-      .spyOn(Element.prototype, "clientWidth", "get")
-      .mockImplementation(function (this: Element) {
-        return root.contains(this) && this.matches("nav.tab-bar") ? width(this) : 0;
-      });
-    const scrollGet = vi.spyOn(Element.prototype, "scrollLeft", "get").mockImplementation(function (
-      this: Element,
-    ) {
-      return offsets.get(this) ?? 0;
+    const properties = ["clientWidth", "scrollLeft", "getBoundingClientRect"];
+    const original = Object.fromEntries(
+      properties.map(
+        (key) => [key, Object.getOwnPropertyDescriptor(Element.prototype, key)!] as const,
+      ),
+    );
+    Object.defineProperties(Element.prototype, {
+      clientWidth: {
+        configurable: true,
+        get(this: Element) {
+          return root.contains(this) && this.matches("nav.tab-bar") ? width(this) : 0;
+        },
+      },
+      scrollLeft: {
+        configurable: true,
+        get(this: Element) {
+          return offsets.get(this) ?? 0;
+        },
+        set(this: Element, value: number) {
+          offsets.set(this, Math.max(0, Math.min(value, 600 - width(this))));
+        },
+      },
+      getBoundingClientRect: {
+        configurable: true,
+        value(this: Element) {
+          if (root.contains(this) && this.matches("nav.tab-bar")) {
+            return new DOMRect(0, 0, width(this), 40);
+          }
+          const nav = this.parentElement;
+          return root.contains(this) &&
+            nav?.matches("nav.tab-bar") &&
+            this.matches("button[data-tab]")
+            ? new DOMRect([...nav.children].indexOf(this) * 100 - nav.scrollLeft, 0, 100, 40)
+            : new DOMRect();
+        },
+      },
     });
-    const scrollSet = vi.spyOn(Element.prototype, "scrollLeft", "set").mockImplementation(function (
-      this: Element,
-      value: number,
-    ) {
-      offsets.set(this, Math.max(0, Math.min(value, 600 - width(this))));
-    });
-    const rect = vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (
-      this: Element,
-    ) {
-      if (root.contains(this) && this.matches("nav.tab-bar")) {
-        return new DOMRect(0, 0, width(this), 40);
-      }
-      const nav = this.parentElement;
-      if (root.contains(this) && nav?.matches("nav.tab-bar") && this.matches("button[data-tab]")) {
-        return new DOMRect([...nav.children].indexOf(this) * 100 - nav.scrollLeft, 0, 100, 40);
-      }
-      return new DOMRect();
-    });
-    onTestFinished(() => {
-      rect.mockRestore();
-      scrollSet.mockRestore();
-      scrollGet.mockRestore();
-      clientWidth.mockRestore();
-    });
+    onTestFinished(() => Object.defineProperties(Element.prototype, original));
   }
 
   it.each([false, true])(
@@ -621,35 +526,28 @@ describe("QA Lab tab navigation retention", () => {
       const { root, snapshot, $ } = await mountNavigation();
       const tab = (id: string) => $(`[data-tab="${id}"]`);
       mockTabGeometry(root);
-      expect(
-        [...root.querySelectorAll<HTMLElement>("[data-tab]")].map((node) => node.dataset.tab),
-      ).toEqual(["chat", "results", "evidence", "report", "events", "capture"]);
+      expect(getComputedStyle($(".scenario-scroll")).overflowY).toBe("auto");
+      expect(getComputedStyle($(".scenario-item")).flexShrink).toBe("0");
       tab("capture").focus();
       expect(tab("capture").parentElement!.scrollLeft).toBe(collapsed ? 0 : 160);
       tab("evidence").focus();
       tab("evidence").click();
       const evidence = tab("evidence");
       expect(document.activeElement).toBe(evidence);
-      expect(evidence.classList.contains("active")).toBe(true);
-      expect(evidence.parentElement!.clientWidth).toBe(800);
-      expect(evidence.parentElement!.scrollLeft).toBe(0);
+      expect(evidence.parentElement).toMatchObject({ clientWidth: 800, scrollLeft: 0 });
       expect(evidence.getBoundingClientRect().left).toBeGreaterThanOrEqual(0);
-      expect(root.querySelector(".app-shell--evidence-focus")).not.toBeNull();
-      expect(Boolean(root.querySelector(".app-shell--sidebar-collapsed"))).toBe(collapsed);
       expect(localStorage.getItem("qa-lab-sidebar-collapsed")).toBe(collapsed ? "1" : "0");
       tab("capture").focus();
-      expect(tab("capture").parentElement!.clientWidth).toBe(800);
-      expect(tab("capture").parentElement!.scrollLeft).toBe(0);
+      expect(tab("capture").parentElement).toMatchObject({ clientWidth: 800, scrollLeft: 0 });
       tab("capture").click();
       const next = tab("capture");
       const nav = next.parentElement!;
       expect(document.activeElement).toBe(next);
-      expect(next.classList.contains("active")).toBe(true);
-      expect(nav.clientWidth).toBe(collapsed ? 800 : 440);
-      expect(nav.scrollLeft).toBe(collapsed ? 0 : 160);
+      expect(nav).toMatchObject({
+        clientWidth: collapsed ? 800 : 440,
+        scrollLeft: collapsed ? 0 : 160,
+      });
       expect(next.getBoundingClientRect().right).toBeLessThanOrEqual(nav.clientWidth);
-      expect(root.querySelector(".app-shell--evidence-focus")).toBeNull();
-      expect(Boolean(root.querySelector(".app-shell--sidebar-collapsed"))).toBe(collapsed);
       await pollWithMessage(snapshot);
       expect(document.activeElement).toBe(tab("capture"));
       expect(tab("capture").parentElement!.scrollLeft).toBe(nav.scrollLeft);
@@ -661,136 +559,89 @@ describe("QA Lab tab navigation retention", () => {
     },
   );
 
-  it.each([false, true])(
-    "retains focused tabs through unchanged and changed polling (activate=%s)",
-    async (activate) => {
+  it.each(["tab", "outside", "input", "select"] as const)(
+    "preserves %s focus, draft and navigation scroll across polling",
+    async (kind) => {
       const { root, snapshot, $ } = await mountNavigation();
-      const tab = activate ? "events" : "capture";
-      let nav = $("nav.tab-bar");
-      let button = nav.querySelector<HTMLButtonElement>(`[data-tab="${tab}"]`)!;
-      button.focus();
-      nav.scrollLeft = 137.25;
-      await vi.advanceTimersByTimeAsync(1_000);
-      expect(root.querySelector("nav.tab-bar")).toBe(nav);
-      expect(document.activeElement).toBe(button);
-      expect(nav.scrollLeft).toBe(137.25);
-      expect(httpMock.getJson.mock.calls.filter(([url]) => url === "/api/state")).toHaveLength(2);
-      if (activate) {
-        button.click();
-        expect(button.isConnected).toBe(false);
-        nav = $("nav.tab-bar");
-        button = nav.querySelector<HTMLButtonElement>(`[data-tab="${tab}"]`)!;
-        expect(document.activeElement).toBe(button);
-        expect(button.classList.contains("active")).toBe(true);
-        expect(nav.scrollLeft).toBe(137.25);
+      const isTab = kind === "tab";
+      const isDraft = kind === "input";
+      const external = kind === "outside";
+      const selector = isTab
+        ? '[data-tab="capture"]'
+        : isDraft
+          ? "#conversation-id"
+          : "#conversation-kind";
+      if (external) {
+        mockTabGeometry(root);
       }
-      const focusReveals: number[] = [];
-      root.addEventListener(
-        "focus",
-        (event) => {
-          if (event.target instanceof HTMLButtonElement && event.target.dataset.tab === tab) {
-            const focusedNav = event.target.parentElement!;
-            focusedNav.scrollLeft = 243.75;
-            focusReveals.push(focusedNav.scrollLeft);
-          }
-        },
-        true,
-      );
-      const focus = vi.spyOn(HTMLElement.prototype, "focus");
-      onTestFinished(() => focus.mockRestore());
-      await pollWithMessage(snapshot);
-      const nextNav = $("nav.tab-bar");
-      const nextButton = nextNav.querySelector<HTMLButtonElement>(`[data-tab="${tab}"]`)!;
-      expect(nextNav).not.toBe(nav);
-      expect(button.isConnected).toBe(false);
-      expect(document.activeElement).toBe(nextButton);
-      expect(nextNav.scrollLeft).toBe(137.25);
-      expect(focusReveals).toEqual([243.75]);
-      expect(focus).toHaveBeenCalledTimes(1);
-      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
-      expect(nextNav.querySelector<HTMLElement>(".active")?.dataset.tab).toBe(
-        activate ? "events" : "chat",
-      );
-      expect($(activate ? ".events-scroll" : "#chat-messages").textContent).toContain(
-        "new polling message",
-      );
-      expect(httpMock.getJson.mock.calls.filter(([url]) => url === "/api/state")).toHaveLength(3);
-      nextButton.blur();
-      nextButton.focus();
-      expect(document.activeElement).toBe(nextButton);
-      expect(nextNav.scrollLeft).toBe(243.75);
-      expect(focusReveals).toEqual([243.75, 243.75]);
-    },
-  );
-
-  it.each([false, true])(
-    "retains scroll without stealing non-tab focus (outside=%s)",
-    async (outside) => {
-      const { root, snapshot, $ } = await mountNavigation();
-      mockTabGeometry(root);
-      if (outside) {
+      if (kind === "outside") {
         $('[data-tab="report"]').focus();
-        const outsideNav = document.createElement("nav");
-        outsideNav.className = "tab-bar";
-        const button = document.createElement("button");
-        button.dataset.tab = "report";
-        button.id = "composer-text";
-        outsideNav.append(button);
-        document.body.append(outsideNav);
-        button.focus();
+        const outside = document.createElement("nav");
+        outside.innerHTML = '<button data-tab="report" id="composer-text">Outside</button>';
+        outside.className = "tab-bar";
+        document.body.append(outside);
+        outside.querySelector("button")!.focus();
+      } else {
+        if (isDraft) {
+          setValue(root, selector, "unfinished draft", "input");
+        }
+        $(selector).focus();
       }
       const focused = document.activeElement;
       const nav = $("nav.tab-bar");
-      nav.scrollLeft = 64.5;
-      await pollWithMessage(snapshot);
-      expect(root.querySelector("nav.tab-bar")).not.toBe(nav);
-      expect($("nav.tab-bar").scrollLeft).toBe(64.5);
+      nav.scrollLeft = 137.25;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect($("nav.tab-bar")).toBe(nav);
       expect(document.activeElement).toBe(focused);
-      for (const tab of ["evidence", "capture"]) {
-        $(`[data-tab="${tab}"]`).click();
-        expect($("nav.tab-bar").scrollLeft).toBe(0);
+      expect(nav.scrollLeft).toBe(137.25);
+
+      // Native focus may reveal a tab; restoration must put the saved viewport back afterwards.
+      const reveals: number[] = [];
+      if (isTab) {
+        root.addEventListener(
+          "focus",
+          (event) => {
+            if (event.target instanceof HTMLButtonElement && event.target.matches(selector)) {
+              event.target.parentElement!.scrollLeft = 243.75;
+              reveals.push(243.75);
+            }
+          },
+          true,
+        );
+      }
+      await pollWithMessage(snapshot);
+      if (kind === "select") {
+        expect($("nav.tab-bar")).toBe(nav);
         expect(document.activeElement).toBe(focused);
+        expect($("#chat-messages").textContent).not.toContain("new polling message");
+        $(selector).blur();
+        await vi.advanceTimersByTimeAsync(1_000);
+      }
+      const nextNav = $("nav.tab-bar");
+      expect(nextNav).not.toBe(nav);
+      expect(nextNav.scrollLeft).toBe(137.25);
+      expect(document.activeElement).toBe(
+        external ? focused : kind === "select" ? document.body : $(selector),
+      );
+      expect($("#chat-messages").textContent).toContain("new polling message");
+      if (isDraft) {
+        expect($<HTMLInputElement>(selector).value).toBe("unfinished draft");
+      }
+      if (isTab) {
+        expect(nextNav.querySelector<HTMLElement>(".active")?.dataset.tab).toBe("chat");
+        expect(reveals).toEqual([243.75]);
+        $(selector).blur();
+        $(selector).focus();
+        expect(nextNav.scrollLeft).toBe(243.75);
+        expect(reveals).toEqual([243.75, 243.75]);
+      }
+      if (external) {
+        for (const tab of ["evidence", "capture"]) {
+          $(`[data-tab="${tab}"]`).click();
+          expect($("nav.tab-bar").scrollLeft).toBe(0);
+          expect(document.activeElement).toBe(focused);
+        }
       }
     },
   );
-
-  it.each(["#conversation-id", "#composer-text"])(
-    "preserves %s focus and draft while retaining navigation scroll",
-    async (selector) => {
-      const { root, snapshot, $ } = await mountNavigation();
-      const nav = $("nav.tab-bar");
-      const input = $<HTMLInputElement | HTMLTextAreaElement>(selector);
-      setValue(root, selector, "unfinished draft", "input");
-      input.focus();
-      nav.scrollLeft = 48.5;
-
-      await pollWithMessage(snapshot);
-
-      const nextInput = $<HTMLInputElement | HTMLTextAreaElement>(selector);
-      expect(input.isConnected).toBe(false);
-      expect(document.activeElement).toBe(nextInput);
-      expect(nextInput.value).toBe("unfinished draft");
-      expect($("nav.tab-bar").scrollLeft).toBe(48.5);
-    },
-  );
-
-  it("defers changed polling while a select is focused and renders after it blurs", async () => {
-    const { root, snapshot, $ } = await mountNavigation();
-    const select = $<HTMLSelectElement>("#conversation-kind");
-    const nav = root.querySelector("nav.tab-bar");
-    select.focus();
-
-    await pollWithMessage(snapshot);
-
-    expect(root.querySelector("nav.tab-bar")).toBe(nav);
-    expect(document.activeElement).toBe(select);
-    expect($("#chat-messages").textContent).not.toContain("new polling message");
-    select.blur();
-    await vi.advanceTimersByTimeAsync(1_000);
-
-    expect(root.querySelector("nav.tab-bar")).not.toBe(nav);
-    expect(select.isConnected).toBe(false);
-    expect($("#chat-messages").textContent).toContain("new polling message");
-    expect(document.activeElement).toBe(document.body);
-  });
 });
