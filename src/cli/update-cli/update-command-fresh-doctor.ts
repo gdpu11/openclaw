@@ -1,6 +1,5 @@
 // Runs post-plugin convergence checks without retaining pre-update plugin modules.
 import os from "node:os";
-import path from "node:path";
 import { collectNestedErrorCandidates } from "@openclaw/normalization-core/error-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { resolveOpenClawCliInvocation } from "../../../cli-invocation.mjs";
@@ -19,6 +18,10 @@ import {
   readDeferredPluginMigrationsAsync,
 } from "../../infra/deferred-plugin-migrations.js";
 import { runtimeProcessEntrypoints } from "../../infra/runtime-process-entrypoints.js";
+import {
+  resolveRuntimeWorkerArgv,
+  resolveRuntimeWorkerUrl,
+} from "../../infra/runtime-worker-url.js";
 import { resolveAggregateSqliteInspectionTimeoutMs } from "../../infra/sqlite-readonly-worker.js";
 import { collectStateDatabasePaths } from "../../infra/update-candidate-state.js";
 import { readUpdateStateDatabaseSizes } from "../../infra/update-candidate-state.sizes.js";
@@ -189,12 +192,15 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
         [UPDATE_DOCTOR_HISTORICAL_SCANS_ENV]: reusableScans,
       };
     }
+    const workerRuntime = params.nodeRunner ?? resolveNodeRunner();
     const workerCommand = [
-      params.nodeRunner ?? resolveNodeRunner(),
-      path.join(
-        params.root,
-        "dist",
-        runtimeProcessEntrypoints.updateMigratedFinalize.distWorkerPath,
+      workerRuntime,
+      ...resolveRuntimeWorkerArgv(
+        resolveRuntimeWorkerUrl({
+          ...runtimeProcessEntrypoints.updateMigratedFinalize,
+          root: params.root,
+        }),
+        workerRuntime,
       ),
     ];
     const doctorConfigWrites =

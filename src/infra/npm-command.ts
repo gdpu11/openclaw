@@ -1,20 +1,20 @@
 import fs from "node:fs";
-import { createRequire } from "node:module";
-import path from "node:path";
-import { resolveStandaloneNpmCliPath } from "../../cli-invocation.mjs";
-
-const require = createRequire(import.meta.url);
+import { fileURLToPath } from "node:url";
+import { resolveRuntimeDependencyEntrypointUrl } from "./runtime-process-dependency-url.js";
+import { runtimeProcessDependencyEntrypoints } from "./runtime-process-manifest.js";
 
 /** Runs the packaged npm CLI with the current JavaScript runtime. */
 export function resolveBundledNpmCommand(args: readonly string[]): [string, string, ...string[]] {
-  let cliPath = "npm/bin/npm-cli.js";
+  let cliPath: string = runtimeProcessDependencyEntrypoints.npm.specifier;
   try {
-    cliPath =
-      resolveStandaloneNpmCliPath() ??
-      path.join(path.dirname(require.resolve("npm/package.json")), "bin", "npm-cli.js");
-    if (!fs.statSync(cliPath).isFile()) {
+    const resolvedCliPath = fileURLToPath(
+      resolveRuntimeDependencyEntrypointUrl("npm", import.meta.url),
+    );
+    cliPath = resolvedCliPath;
+    if (!fs.statSync(resolvedCliPath).isFile()) {
       throw new Error("Not a regular file");
     }
+    return [process.execPath, resolvedCliPath, ...args];
   } catch (cause) {
     throw Object.assign(
       new Error(
@@ -24,7 +24,6 @@ export function resolveBundledNpmCommand(args: readonly string[]): [string, stri
       { code: "BUNDLED_NPM_CLI_NOT_FOUND", name: "BundledNpmCliNotFoundError" },
     );
   }
-  return [process.execPath, cliPath, ...args];
 }
 
 /** Bun must run the packaged CLI directly; npm's executable requires Node. */
