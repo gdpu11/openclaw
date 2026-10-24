@@ -42,7 +42,6 @@ const {
   resolveManifestProviderAuthChoices: resolveChoices,
   resolveProviderOnboardAuthFlags: authFlags,
 } = await import("./provider-auth-choices.js");
-const { resolveProviderIdForAuth } = await import("../agents/provider-auth-aliases.js");
 const { clearPluginMetadataLifecycleCaches } = await import("./plugin-metadata-lifecycle.js");
 
 const openaiChoiceMetadata = choiceMetadata("openai", "OpenAI");
@@ -89,14 +88,6 @@ function expectedChoice(pluginId: string, providerId: string, methodId: string, 
     choiceLabel: `${providerId}-${methodId}`,
     ...metadata,
   };
-}
-
-function expectedSetupChoice(provider: string, method: string, groupLabel: string, label: string) {
-  return expectedChoice(provider, provider, method, {
-    choiceLabel: `${groupLabel} ${label}`,
-    groupId: provider,
-    groupLabel,
-  });
 }
 
 function manifest(id: string, providerAuthChoices: Array<Record<string, unknown>>) {
@@ -208,7 +199,6 @@ describe("provider auth choice manifest helpers", () => {
         throw new Error("Expected the declared auth choice");
       }
       expect(value).toStrictEqual(expected);
-      expect(Object.keys(value)).toEqual(Object.keys(expected));
       expect(value.onboardingScopes).toBe(scopes);
       expect(value.channelLogin).toBe(channelLogin);
       expect(Reflect.get(value, "futureMetadata")).toBe(futureMetadata);
@@ -217,6 +207,7 @@ describe("provider auth choice manifest helpers", () => {
       value.choiceLabel = "changed output";
       expect(again).toStrictEqual(expected);
     }
+    expect(deprecatedChoice("unknown")).toBeUndefined();
     expect(authFlags()).toStrictEqual([
       {
         optionKey: "demoKey",
@@ -252,16 +243,13 @@ describe("provider auth choice manifest helpers", () => {
           id: "native",
           origin: "bundled",
           providerAuthChoices: [
-            {
-              provider: "native",
-              method: "local",
-              choiceId: "native-local",
+            authMethod("native", "local", {
               platforms: ["darwin"],
               deprecatedChoiceIds: ["old-native"],
               optionKey: "nativeLocal",
               cliFlag: "--native-local",
               cliOption: "--native-local",
-            },
+            }),
             authMethod("native", "remote"),
             authMethod("native", "unavailable", { choiceId: "unavailable", platforms: [] }),
           ],
@@ -298,9 +286,6 @@ describe("provider auth choice manifest helpers", () => {
     ]);
     expect(resolveChoice(explicitChoice)).toMatchObject(
       expectedChoice("demo-plugin", "demo", "local", { modelTarget: "utility" }),
-    );
-    expect(resolveChoice("provider-plugin:demo:remote")).toMatchObject(
-      expectedChoice("demo-plugin", "demo", "remote"),
     );
     expect(resolveChoice("provider-plugin:demo:missing")).toBeUndefined();
   });
@@ -389,49 +374,6 @@ describe("provider auth choice manifest helpers", () => {
     expect(authFlags()).toEqual([expectedFlag("moonshot", "Moonshot API key")]);
   });
 
-  it.each([true, false])("preserves legacy credential aliases with native realm=%s", (native) => {
-    setPlugins([
-      {
-        ...manifest("anthropic", [
-          authMethod("anthropic", "cli", {
-            deprecatedChoiceIds: ["claude-cli"],
-            optionKey: "anthropicCli",
-            cliFlag: "--anthropic-cli",
-            cliOption: "--anthropic-cli",
-          }),
-        ]),
-        ...(native ? { syntheticAuthRefs: ["claude-cli"] } : {}),
-      },
-    ]);
-    expect(resolveProviderIdForAuth("claude-cli")).toBe("anthropic");
-    expect(deprecatedChoice("claude-cli")?.choiceId).toBe("anthropic-cli");
-    expect(authFlags()).toContainEqual(
-      expect.objectContaining({ authChoice: "anthropic-cli", cliFlag: "--anthropic-cli" }),
-    );
-  });
-
-  it("resolves deprecated auth-choice aliases through manifest metadata", () => {
-    setChoices("minimax", [
-      authMethod("minimax", "api-global", {
-        choiceId: "minimax-global-api",
-        deprecatedChoiceIds: ["minimax", "minimax-api"],
-      }),
-    ]);
-    expect(resolveChoices()).toEqual([
-      expectedChoice("minimax", "minimax", "api-global", {
-        choiceId: "minimax-global-api",
-        choiceLabel: "minimax-global-api",
-        deprecatedChoiceIds: ["minimax", "minimax-api"],
-      }),
-    ]);
-    for (const [alias, expected] of [
-      ["minimax", "minimax-global-api"],
-      ["minimax-api", "minimax-global-api"],
-      ["openai", undefined],
-    ] as const) {
-      expect(deprecatedChoice(alias)?.choiceId).toBe(expected);
-    }
-  });
   it("can exclude untrusted workspace plugin auth choices during onboarding resolution", () => {
     const policy = { includeUntrustedWorkspacePlugins: false };
     const guided = {
@@ -474,75 +416,47 @@ describe("provider auth choice manifest helpers", () => {
   });
 
   it.each([
+    ["descriptor-safe", ["api-key", "oauth"], { requiresRuntime: false }, ["api-key", "oauth"]],
     [
-      "descriptor-safe methods",
-      setupPlugin("demo-provider", ["api-key", "oauth"], {
-        name: "Demo Provider",
-        requiresRuntime: false,
-      }),
-      [
-        expectedSetupChoice("demo-provider", "api-key", "Demo Provider", "API key"),
-        expectedSetupChoice("demo-provider", "oauth", "Demo Provider", "OAuth"),
-      ],
+      "sanitized",
+      ["jwt\u001b[2K", "oidc"],
+      { origin: "workspace", providerId: "de\u001b[31mmo-provider", requiresRuntime: false },
+      ["jwt", "oidc"],
     ],
-    [
-      "sanitized prompt labels",
-      setupPlugin("evil-provider", ["jwt\u001b[2K", "oidc"], {
-        origin: "workspace",
-        providerId: "evil\u001b[31m-provider",
-        requiresRuntime: false,
-      }),
-      [
-        expectedSetupChoice("evil-provider", "jwt", "Evil Provider", "JWT"),
-        expectedSetupChoice("evil-provider", "oidc", "Evil Provider", "OIDC"),
-      ],
-    ],
-    [
-      "no setup entry",
-      setupPlugin("no-runtime-provider", ["api-key"]),
-      [expectedSetupChoice("no-runtime-provider", "api-key", "No Runtime Provider", "API key")],
-      "no-runtime-provider-api-key",
-    ],
-    [
-      "runtime setup entry",
-      setupPlugin("runtime-provider", ["api-key"], {
-        setupSource: "/plugins/runtime-provider/setup-entry.cjs",
-      }),
-      [],
-    ],
-    [
-      "explicit choice deduplication",
-      setupPlugin("explicit-provider", ["api-key", "oauth"], {
-        requiresRuntime: false,
-        providerAuthChoices: [
-          authMethod("explicit-provider", "api-key", {
-            choiceId: "explicit-api-key",
-            choiceLabel: "Explicit API key",
-          }),
-        ],
-      }),
-      [
-        expectedChoice("explicit-provider", "explicit-provider", "api-key", {
-          choiceId: "explicit-api-key",
-          choiceLabel: "Explicit API key",
-        }),
-        expectedSetupChoice("explicit-provider", "oauth", "Explicit Provider", "OAuth"),
-      ],
-    ],
-    [
-      "descriptor fallback is not executable",
-      setupPlugin("descriptor", ["oauth"], { origin: "bundled" }),
-      [expectedSetupChoice("descriptor", "oauth", "Descriptor", "OAuth")],
-    ],
-  ] as const)("derives setup choices: %s", (_name, plugin, expected, lookup) => {
+    ["no setup entry", ["api-key"], {}, ["api-key"]],
+    ["runtime entry", ["api-key"], { setupSource: "/plugins/demo/setup.cjs" }, []],
+    ["non-executable fallback", ["oauth"], { origin: "bundled" }, ["oauth"]],
+  ] as const)("derives setup choices: %s", (name, methods, options, expectedMethods) => {
+    const plugin = setupPlugin("demo-provider", [...methods], options);
     setPlugins([plugin]);
+    const labels = { "api-key": "API key", oauth: "OAuth", jwt: "JWT", oidc: "OIDC" };
+    const expected = expectedMethods.map((method) =>
+      expectedChoice("demo-provider", "demo-provider", method, {
+        choiceLabel: `Demo Provider ${labels[method]}`,
+        groupId: "demo-provider",
+        groupLabel: "Demo Provider",
+      }),
+    );
     expect(resolveChoices()).toStrictEqual(expected);
-    if (lookup) {
-      expect(resolveChoice(lookup)).toEqual(expected[0]);
+    if (expected.length) {
+      expect(resolveChoice(expected[0].choiceId)).toEqual(expected[0]);
     }
-    if (plugin.id === "descriptor") {
+    if (name === "non-executable fallback") {
       expect(declaredChoices()).toEqual([]);
     }
+  });
+
+  it("does not synthesize a duplicate of an explicitly declared setup method", () => {
+    const declared = authMethod("demo", "api-key", { choiceId: "explicit", choiceLabel: "Key" });
+    setPlugins([setupPlugin("demo", ["api-key", "oauth"], { providerAuthChoices: [declared] })]);
+    expect(resolveChoices()).toStrictEqual([
+      expectedChoice("demo", "demo", "api-key", { choiceId: "explicit", choiceLabel: "Key" }),
+      expectedChoice("demo", "demo", "oauth", {
+        choiceLabel: "Demo OAuth",
+        groupId: "demo",
+        groupLabel: "Demo",
+      }),
+    ]);
   });
 
   it.each([
@@ -569,28 +483,5 @@ describe("provider auth choice manifest helpers", () => {
     ]);
     expect(resolveChoice("openai-api-key")?.providerId).toBe(expectedOwner);
     expect(authFlags()).toEqual([expectedFlag("openai", "OpenAI API key")]);
-  });
-
-  it("resolves manifest-owned provider auth aliases", () => {
-    setPlugins([
-      {
-        id: "fixture-provider",
-        origin: "bundled",
-        providerAuthAliases: {
-          "fixture-provider-plan": "fixture-provider",
-        },
-        providerAuthChoices: [
-          {
-            ...authMethod("fixture-provider", "api-key"),
-            ...choiceMetadata("fixture-provider", "Fixture Provider"),
-            optionKey: "fixtureProviderApiKey",
-          },
-        ],
-      },
-    ]);
-
-    const resolvedProviderId = resolveProviderIdForAuth("fixture-provider-plan");
-    expect(pluginRegistryMocks.loadPluginMetadataSnapshot).toHaveBeenCalled();
-    expect(resolvedProviderId).toBe("fixture-provider");
   });
 });

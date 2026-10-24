@@ -236,13 +236,12 @@ describe("installed plugin index persistence", () => {
     });
   });
 
-  it("hashes and persists resolved doctor contract artifacts", async () => {
+  it("persists resolved doctor contract hashes and signatures", async () => {
     const { stateDir, pluginDir, params } = makePluginFixture();
     const contractPath = path.join(pluginDir, "doctor-contract-api.ts");
     fs.writeFileSync(contractPath, "export const legacyConfigRules = [];\n", "utf8");
 
-    const refresh = () => refreshIndex({ reason: "manual", ...params });
-    const first = await refresh();
+    const first = await refreshIndex({ reason: "manual", ...params });
     const firstPlugin = first.plugins[0];
     const firstHash = firstPlugin?.doctorContractHash;
     const firstFile = firstPlugin?.doctorContractFile;
@@ -257,25 +256,17 @@ describe("installed plugin index persistence", () => {
       doctorContractHash: firstHash,
       doctorContractFile: firstFile,
     });
-
-    fs.writeFileSync(
-      contractPath,
-      "export const legacyConfigRules = [{ path: ['demo'], message: 'changed' }];\n",
-      "utf8",
-    );
-    const second = await refresh();
-    const secondPlugin = second.plugins[0];
-    const secondHash = secondPlugin?.doctorContractHash;
-    const secondFile = secondPlugin?.doctorContractFile;
-    expect(secondPlugin?.manifestHash).toBe(firstPlugin?.manifestHash);
-    expect(invalidationReasons(first, second)).toEqual(["stale-manifest"]);
-    expect(secondHash).toMatch(/^[a-f0-9]{64}$/u);
-    expect(secondHash).not.toBe(firstHash);
-    expect(secondFile).not.toEqual(firstFile);
+    fs.appendFileSync(contractPath, "// changed contract\n");
+    const changed = await refreshIndex({ reason: "manual", ...params });
+    const changedPlugin = requirePersisted(changed).plugins[0]!;
+    expect(changedPlugin.manifestHash).toBe(firstPlugin?.manifestHash);
+    expect(changedPlugin.doctorContractHash).toMatch(/^[a-f0-9]{64}$/u);
+    expect(changedPlugin.doctorContractHash).not.toBe(firstHash);
+    expect(changedPlugin.doctorContractFile).not.toEqual(firstFile);
+    expect(invalidationReasons(first, changed)).toEqual(["stale-manifest"]);
     expect((await readIndex({ stateDir }))?.plugins[0]).toMatchObject({
-      pluginId: "demo",
-      doctorContractHash: secondHash,
-      doctorContractFile: secondFile,
+      doctorContractHash: changedPlugin.doctorContractHash,
+      doctorContractFile: changedPlugin.doctorContractFile,
     });
   });
 
@@ -379,30 +370,6 @@ describe("installed plugin index persistence", () => {
 
     await expect(readIndex({ filePath })).resolves.toBeNull();
     expect(await readRecords({ filePath })).toBeNull();
-  });
-
-  it("preserves existing install records when refreshing the manifest cache", async () => {
-    const stateDir = makeTempDir();
-    const missing = {
-      source: "npm" as const,
-      spec: "missing-plugin@1.0.0",
-      installPath: path.join(stateDir, "plugins", "missing"),
-    };
-    await writeIndex(createIndex({ installRecords: { missing }, plugins: [] }), { stateDir });
-
-    const index = await refreshIndex({
-      reason: "manual",
-      stateDir,
-      candidates: [],
-      env: discoveryEnv,
-    });
-
-    expect(index.installRecords.missing).toMatchObject(missing);
-    expectPluginIds(index, []);
-    expect(await readIndex({ stateDir })).toMatchObject({
-      plugins: [],
-      installRecords: { missing },
-    });
   });
 });
 

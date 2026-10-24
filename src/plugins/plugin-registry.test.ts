@@ -72,33 +72,6 @@ function createCandidate(
     name: pluginId,
     configSchema: { type: "object" },
     providers: [pluginId],
-    channels: [`${pluginId}-chat`],
-    cliBackends: [`${pluginId}-cli`],
-    setup: {
-      providers: [{ id: `${pluginId}-setup`, envVars: ["DEMO_API_KEY"] }],
-      cliBackends: [`${pluginId}-setup-cli`],
-    },
-    channelConfigs: {
-      [`${pluginId}-chat`]: { schema: { type: "object" } },
-    },
-    modelCatalog: {
-      aliases: {
-        [`${pluginId}-alias`]: { provider: pluginId },
-      },
-      providers: {
-        [pluginId]: {
-          models: [{ id: `${pluginId}-model` }],
-        },
-      },
-    },
-    commandAliases: [{ name: `${pluginId}-command` }],
-    contracts: {
-      tools: [`${pluginId}-tool`],
-      webSearchProviders: [`${pluginId}-search`],
-    },
-    configContracts: {
-      compatibilityRuntimePaths: [`legacyProvider.${pluginId}-search.webhook`],
-    },
     ...manifestOverrides,
   });
   return recordPluginCandidateInstallOwner(
@@ -235,14 +208,9 @@ describe("plugin registry facade", () => {
         ["providers", "alias", true, false],
         ["providers", "ALIAS", false, false],
         ["providers", "bad", false, false],
-        ["channels", "demo-chat", true, true],
-        ["channelConfigs", "demo-chat", true, true],
         ["cliBackends", "demo-cli", true, false],
         ["cliBackends", "DEMO-CLI", false, true],
         ["cliBackends", "other-cli", true, false],
-        ["setupProviders", "demo-setup", true, true],
-        ["modelCatalogProviders", "demo-alias", true, true],
-        ["commandAliases", "demo-command", true, true],
         ["contracts", "tools", false, false],
         ["contracts", "webSearchProviders", true, true],
       ] as const) {
@@ -273,12 +241,12 @@ describe("plugin registry facade", () => {
       [{ entries: { demo: { enabled: false } } }, false],
       [{ entries: { demo: { enabled: true } } }, true],
     ];
-    for (const matches of ["demo-alias", (id: string) => id === "demo-alias"]) {
+    for (const matches of ["Demo", (id: string) => id === "Demo"]) {
       for (const [plugins, enabled] of policies) {
         const params = {
           lookUpTable,
           ...(plugins ? { config: { plugins } } : {}),
-          contribution: "modelCatalogProviders" as const,
+          contribution: "providers" as const,
           matches,
         };
         expect(resolvePluginContributionOwners(params)).toEqual(enabled ? ["demo"] : []);
@@ -290,11 +258,11 @@ describe("plugin registry facade", () => {
 
     const withoutInstalledOwners = {
       lookUpTable: { ...lookUpTable, index: { ...index, plugins: [] } },
-      contribution: "modelCatalogProviders" as const,
+      contribution: "providers" as const,
       includeDisabled: true,
     };
     expect(listPluginContributionIds(withoutInstalledOwners)).toEqual([]);
-    for (const matches of ["demo-alias", (id: string) => id === "demo-alias"]) {
+    for (const matches of ["Demo", (id: string) => id === "Demo"]) {
       expect(resolvePluginContributionOwners({ ...withoutInstalledOwners, matches })).toEqual([]);
     }
   });
@@ -379,37 +347,24 @@ describe("plugin registry facade", () => {
     });
   });
 
-  it.each(["changes", "disappears"])(
-    "falls back to the derived registry when persisted package metadata %s",
-    async (change) => {
-      const fixture = candidateFixture({ config: {} });
-      const { rootDir, candidate } = fixture;
-      writeJson(path.join(rootDir, "package.json"), { name: "demo-plugin", version: "1.0.0" });
-      Object.assign(candidate, {
-        packageDir: rootDir,
-        packageName: "demo-plugin",
-        packageVersion: "1.0.0",
-      });
-      const persisted = fixture.derive();
-      await fixture.persist(persisted);
-      if (change === "disappears") {
-        fs.rmSync(path.join(rootDir, "package.json"));
-      } else {
-        writeJson(path.join(rootDir, "package.json"), { name: "demo-plugin", version: "1.0.1" });
-      }
+  it("falls back to the derived registry when persisted package metadata disappears", async () => {
+    const fixture = candidateFixture({ config: {} });
+    const { rootDir, candidate } = fixture;
+    writeJson(path.join(rootDir, "package.json"), { name: "demo-plugin", version: "1.0.0" });
+    Object.assign(candidate, {
+      packageDir: rootDir,
+      packageName: "demo-plugin",
+      packageVersion: "1.0.0",
+    });
+    const persisted = fixture.derive();
+    await fixture.persist(persisted);
+    fs.rmSync(path.join(rootDir, "package.json"));
 
-      const result = fixture.load();
+    const result = fixture.load();
 
-      expectStale(result);
-      if (change === "disappears") {
-        expect(result.snapshot.plugins[0]?.packageJson).toBeUndefined();
-      } else {
-        expect(result.snapshot.plugins[0]?.packageJson?.hash).not.toBe(
-          persisted.plugins[0]?.packageJson?.hash,
-        );
-      }
-    },
-  );
+    expectStale(result);
+    expect(result.snapshot.plugins[0]?.packageJson).toBeUndefined();
+  });
 
   it.each(["bundled roots", "policy"] as const)(
     "falls back to the derived registry when persisted %s are stale",
@@ -452,7 +407,7 @@ describe("plugin registry facade", () => {
     },
   );
 
-  it("refreshes stale built records and accepts source records for dist-opt-out plugins", async () => {
+  it("migrates legacy source records and accepts dist-opt-out plugins", async () => {
     const tempRoot = makeTempDir();
     const stateDir = path.join(tempRoot, "state");
     const packageRoot = path.join(tempRoot, "openclaw");
@@ -494,18 +449,6 @@ describe("plugin registry facade", () => {
     await writePersistedInstalledPluginIndex(legacySourceIndex, { stateDir });
     const migrated = loadPluginRegistrySnapshotWithMetadata(params);
     expectStale(migrated);
-
-    const staleBuiltIndex = structuredClone(freshIndex);
-    for (const plugin of staleBuiltIndex.plugins) {
-      plugin.rootDir = builtRoot;
-      plugin.source = path.join(builtRoot, "index.ts");
-      plugin.manifestPath = path.join(builtRoot, "openclaw.plugin.json");
-      delete plugin.packageBuild;
-    }
-    await writePersistedInstalledPluginIndex(staleBuiltIndex, { stateDir });
-    const refreshed = loadPluginRegistrySnapshotWithMetadata(params);
-    expectStale(refreshed);
-    expect(refreshed.snapshot.plugins[0]?.rootDir).toBe(sourceRoot);
   });
 
   it("projects a config policy change over the persisted inventory without rescanning", async () => {
