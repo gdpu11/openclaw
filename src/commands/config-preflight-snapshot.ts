@@ -41,7 +41,6 @@ import {
   rethrowStartupConfigFailure,
   throwStartupMigrationGuardRejected,
 } from "./doctor-startup-migration-refusal.js";
-import { addDoctorLegacyIssues } from "./doctor/shared/legacy-config-issues.js";
 
 export type ConfigPreflightSnapshotRead = {
   databaseEngineSelection?: DatabaseEngineSelection;
@@ -142,7 +141,10 @@ async function readConfigPreflightSnapshot(
           return {
             snapshot:
               params.purpose === "doctor" || !result.snapshot.valid
-                ? addDoctorLegacyIssues(result.snapshot, pluginMetadataSnapshot)
+                ? (await import("./doctor/shared/legacy-config-issues.js")).addDoctorLegacyIssues(
+                    result.snapshot,
+                    pluginMetadataSnapshot,
+                  )
                 : result.snapshot,
             ...(pluginMetadataSnapshot ? { pluginMetadataSnapshot } : {}),
           };
@@ -157,7 +159,9 @@ async function readConfigPreflightSnapshot(
         return {
           snapshot:
             params.purpose === "doctor" || !snapshot.valid
-              ? addDoctorLegacyIssues(snapshot)
+              ? (await import("./doctor/shared/legacy-config-issues.js")).addDoctorLegacyIssues(
+                  snapshot,
+                )
               : snapshot,
         };
       },
