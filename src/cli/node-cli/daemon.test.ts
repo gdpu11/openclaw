@@ -180,8 +180,10 @@ describe("runNodeDaemonInstall", () => {
   });
 
   it.each([
+    { recorded: "node", runtime: undefined, probe: "supported" },
     { recorded: "bun", runtime: undefined, probe: "supported" },
     { recorded: "bun", runtime: "node", probe: "supported" },
+    { recorded: "bun", runtime: "bun", probe: "supported" },
     { recorded: "bun", runtime: undefined, probe: "unsupported" },
   ] as const)(
     "reinstalls recorded $recorded ($probe) with runtime=$runtime without a pin",
@@ -201,7 +203,7 @@ describe("runNodeDaemonInstall", () => {
         expect(command[0]).toBe(recordedPath);
       } else {
         expect(command[0]).not.toBe(recordedPath);
-        expect(command[0]).toMatch(/node(?:\.exe)?$/);
+        expect(command[0]).toMatch(runtime === "bun" ? /bun(?:\.exe)?$/ : /node(?:\.exe)?$/);
       }
       expect(installedPlan().runtimePinUpdate).toEqual({
         expected: { revision: "empty", stored: false },
@@ -291,6 +293,8 @@ describe("runNodeDaemonInstall", () => {
     );
     if (all) {
       expect(command).not.toContain("--commands");
+    } else {
+      expect(command).not.toContain("--all-commands");
     }
   });
 

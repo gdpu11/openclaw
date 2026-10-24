@@ -111,6 +111,12 @@ const hiddenPolicy = {
   toolsAllowIsDefault: true,
 };
 
+it("preserves an explicit zero timeout in the saved payload", async () => {
+  const { call, result } = await newJob("no-timeout", { timeoutSeconds: "0" }).submit();
+  expect(result).toEqual({ saved: true, jobId: "no-timeout" });
+  expect(call.payload).toMatchObject({ kind: "agentTurn", timeoutSeconds: 0 });
+});
+
 function patchOf(call: Record<string, unknown>) {
   return requireRecord(call.patch, "cron.update patch");
 }
@@ -182,12 +188,15 @@ it("clears persisted delivery routing", async () => {
   });
 });
 
-it("round trips a maximum safe cooldown through the form", async () => {
-  const { state, submit } = editFields({ failureAlert: { cooldownMs: Number.MAX_SAFE_INTEGER } });
-  expect(state.cronForm.failureAlertCooldownSeconds).toBe("9007199254740.991");
+it.each([
+  [0, "0"],
+  [Number.MAX_SAFE_INTEGER, "9007199254740.991"],
+] as const)("round trips a %s ms cooldown through the form", async (cooldownMs, seconds) => {
+  const { state, submit } = editFields({ failureAlert: { cooldownMs } });
+  expect(state.cronForm.failureAlertCooldownSeconds).toBe(seconds);
   state.cronForm.description = "Metadata changed";
   expect(patchOf(await submit()).failureAlert).toMatchObject({
-    cooldownMs: Number.MAX_SAFE_INTEGER,
+    cooldownMs,
   });
 });
 

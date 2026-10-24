@@ -450,7 +450,9 @@ function mockTabGeometry(root: HTMLElement) {
       },
     },
   });
-  onTestFinished(() => Object.defineProperties(Element.prototype, original));
+  onTestFinished(() => {
+    Object.defineProperties(Element.prototype, original);
+  });
 }
 
 it.each([false, true])(
@@ -488,19 +490,29 @@ it.each([false, true])(
   },
 );
 
-it.each(["tab", "outside", "input", "select"] as const)(
+it("retains the active Events tab through a changed poll", async () => {
+  const { snapshot, $ } = await mountNavigation();
+  $('[data-tab="events"]').click();
+  await pollWithMessage(snapshot);
+  expect($(".events-scroll").textContent).toContain("new polling message");
+  expect($("[data-tab='events']").classList.contains("active")).toBe(true);
+});
+
+it.each(["tab", "outside", "input", "composer", "select"] as const)(
   "preserves %s focus, draft and navigation scroll across polling",
   async (kind) => {
     const { root, snapshot, $ } = await mountNavigation();
     const isTab = kind === "tab";
-    const isDraft = kind === "input";
+    const isDraft = kind === "input" || kind === "composer";
     const external = kind === "outside";
     mockTabGeometry(root);
     const selector = isTab
       ? '[data-tab="capture"]'
-      : isDraft
-        ? "#conversation-id"
-        : "#conversation-kind";
+      : kind === "composer"
+        ? "#composer-text"
+        : isDraft
+          ? "#conversation-id"
+          : "#conversation-kind";
     if (kind === "outside") {
       $('[data-tab="report"]').focus();
       const outside = document.createElement("nav");

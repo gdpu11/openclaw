@@ -9,12 +9,16 @@ import {
   tempWorkspaceSync,
   type TempWorkspaceSync,
 } from "openclaw/plugin-sdk/temp-path";
+import {
+  fixtureReceiptClientSource,
+  openFixtureReceiptChannel,
+  withinTest,
+  type FixtureReceiptChannel,
+} from "openclaw/plugin-sdk/test-fixtures";
 import { build } from "tsdown";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createStateSchemaInlinePlugin } from "../../../scripts/lib/state-schema-inline-plugin.mjs";
 import { encodeOnePasswordSecretId } from "../onepassword-secret-id.js";
-import manifest from "../openclaw.plugin.json" with { type: "json" };
-import packageJson from "../package.json" with { type: "json" };
 import { createTrustedNodeFixture } from "./trusted-node.test-support.js";
 
 const sourceResolverPath = fileURLToPath(
@@ -25,8 +29,11 @@ const sourceStaticAssetPaths = [
   fileURLToPath(new URL("../onepassword-op-path.js", import.meta.url)),
   fileURLToPath(new URL("../onepassword-secret-id.js", import.meta.url)),
 ];
+const manifestPath = fileURLToPath(new URL("../openclaw.plugin.json", import.meta.url));
+const packagePath = fileURLToPath(new URL("../package.json", import.meta.url));
 const rootTsconfigPath = path.resolve("tsconfig.json");
-// Shorten the staged resolver's deadline without changing its production timeout.
+// The manifest test reads the production source; the timeout-only staged executable needs a
+// shorter deadline to prove cleanup without sleeping for the production seven seconds.
 const TEST_OP_READ_TIMEOUT_MS = process.platform === "win32" ? 5_000 : 1_500;
 const secretId = "op://Engineering/OpenRouter/apiKey";
 const serviceToken = "not-a-real-service-account-token";
@@ -37,8 +44,10 @@ let timeoutResolverPath: string;
 let stagedResolverRoot: string | undefined;
 let trustedNodeRoot: string | undefined;
 let trustedNodePath: string;
+let receipts: FixtureReceiptChannel;
 
 beforeAll(async () => {
+  receipts = await openFixtureReceiptChannel();
   const tempRoot = path.join(process.cwd(), ".tmp");
   fs.mkdirSync(tempRoot, { recursive: true });
   stagedResolverRoot = fs.mkdtempSync(path.join(tempRoot, "onepassword-resolver-"));
@@ -82,7 +91,8 @@ beforeAll(async () => {
   trustedNodePath = createTrustedNodeFixture(trustedNodeRoot);
 });
 
-afterAll(() => {
+afterAll(async () => {
+  await receipts?.close();
   if (stagedResolverRoot) {
     fs.rmSync(stagedResolverRoot, { recursive: true, force: true });
   }
@@ -102,18 +112,9 @@ function writeToken(stateDir: string, token: string): void {
 }
 
 function runOp(body: string, params: Parameters<typeof runResolver>[0] = {}) {
-  const windows = process.platform === "win32";
-  const opPath = windows ? process.execPath : path.join(fixtureWorkspace.dir, "op");
-  if (windows) {
-    fs.writeFileSync(path.join(fixtureWorkspace.dir, "read"), body);
-  } else {
-    writeOpScript(opPath, body);
-  }
-  return runResolver({
-    cwd: fixtureWorkspace.dir,
-    ...params,
-    env: { CLAW_1PASSWORD_OP: opPath, ...params.env },
-  });
+  const opPath = path.join(fixtureWorkspace.dir, "op");
+  writeOpScript(opPath, body);
+  return runResolver({ ...params, env: { CLAW_1PASSWORD_OP: opPath, ...params.env } });
 }
 
 function expectFailure(result: Awaited<ReturnType<typeof runResolver>>) {
@@ -130,6 +131,24 @@ function expectValues(
 
 function expectError(result: Awaited<ReturnType<typeof runResolver>>, message: string) {
   expect(JSON.parse(result.stdout).errors).toEqual({ [secretId]: { message } });
+}
+
+async function expectExited(pid: number) {
+  await expect
+    .poll(() => (isProcessAlive(pid) ? `descendant ${pid} is still alive` : "exited"), {
+      timeout: 2_000,
+      interval: 10,
+    })
+    .toBe("exited");
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function runResolver(params: {
@@ -213,6 +232,17 @@ describe("plugin manifest", () => {
     const worstCaseEscapedValueBytes = Buffer.byteLength(
       JSON.stringify("\0".repeat(maxSecretValueBytes)),
     );
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+      commandAliases?: Array<{ name?: string; cliCommand?: string }>;
+      secretProviderIntegrations?: Record<string, Record<string, unknown>>;
+    };
+    const packageJson = JSON.parse(fs.readFileSync(packagePath, "utf8")) as {
+      openclaw?: {
+        build?: {
+          staticAssets?: Array<{ source?: string; output?: string }>;
+        };
+      };
+    };
     const integration = manifest.secretProviderIntegrations?.onepassword;
 
     expect(manifest.commandAliases).toContainEqual({
@@ -224,6 +254,9 @@ describe("plugin manifest", () => {
       source: "exec",
       command: "${node}",
       args: ["./onepassword-secret-ref-resolver.js"],
+      timeoutMs: 90_000,
+      noOutputTimeoutMs: 90_000,
+      maxOutputBytes: 16 * 1024 * 1024,
       passEnv: expect.arrayContaining([
         "HOME",
         "USERPROFILE",
@@ -255,66 +288,65 @@ describe("plugin manifest", () => {
     expect(integration?.maxOutputBytes).toBeGreaterThan(
       maxRefsPerRequest * worstCaseEscapedValueBytes,
     );
-    expect(packageJson.openclaw.build.staticAssets).toEqual(
-      expect.arrayContaining(
-        sourceStaticAssetPaths.map((file) => ({
-          source: `./${path.basename(file)}`,
-          output: path.basename(file),
-        })),
-      ),
-    );
+    for (const name of [
+      "onepassword-op-path.js",
+      "onepassword-secret-ref-resolver.js",
+      "onepassword-secret-id.js",
+    ]) {
+      expect(packageJson.openclaw?.build?.staticAssets).toContainEqual({
+        source: `./${name}`,
+        output: name,
+      });
+    }
   });
 });
 
 describe("1Password SecretRef resolver", () => {
-  it("resolves shorthand references with whitespace and a noninteractive op environment", async () => {
-    const id = "Engineering/OpenRouter/apiKey";
-    const home = path.join(fixtureWorkspace.dir, "profile");
-    const local = path.join(home, "AppData", "Local");
-    const directories = {
-      USERPROFILE: home,
-      APPDATA: path.join(home, "AppData", "Roaming"),
-      LOCALAPPDATA: local,
-      TEMP: path.join(local, "Temp"),
-      TMP: path.join(local, "Tmp"),
-    };
-    for (const directory of Object.values(directories)) {
-      fs.mkdirSync(directory, { recursive: true });
-    }
-    const windows = process.platform === "win32";
-    const expected = {
-      args: [...(windows ? [] : ["read"]), "--cache=false", "--no-newline", secretId],
-      biometric: "false",
-      desktop: "false",
-      serviceAccount: true,
-      ...(windows ? directories : {}),
-    };
-    const result = await runOp(
-      `process.stdout.write(JSON.stringify({
-  args: process.argv.slice(2),
-  biometric: process.env.OP_BIOMETRIC_UNLOCK_ENABLED,
-  desktop: process.env.OP_LOAD_DESKTOP_APP_SETTINGS,
+  it.runIf(process.platform === "win32")(
+    "preserves the Windows profile directories required by op",
+    async () => {
+      const tempDir = fixtureWorkspace.dir;
+      const profile = path.join(tempDir, "profile");
+      const localAppData = path.join(profile, "AppData", "Local");
+      const directories = {
+        USERPROFILE: profile,
+        APPDATA: path.join(profile, "AppData", "Roaming"),
+        LOCALAPPDATA: localAppData,
+        TEMP: path.join(localAppData, "Temp"),
+        TMP: path.join(localAppData, "Tmp"),
+      };
+      for (const directory of Object.values(directories)) {
+        fs.mkdirSync(directory, { recursive: true });
+      }
+      fs.writeFileSync(
+        path.join(tempDir, "read"),
+        `process.stdout.write(JSON.stringify({
+  USERPROFILE: process.env.USERPROFILE,
+  APPDATA: process.env.APPDATA,
+  LOCALAPPDATA: process.env.LOCALAPPDATA,
+  TEMP: process.env.TEMP,
+  TMP: process.env.TMP,
   serviceAccount: process.env.OP_SERVICE_ACCOUNT_TOKEN === "not-a-real-service-account-token",
-  account: process.env.OP_ACCOUNT,
-  ...(process.platform === "win32" ? Object.fromEntries(
-    ["USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"].map(key => [key, process.env[key]])) : {}),
-}) + " \\t");`,
-      {
-        ids: [id],
+}));\n`,
+      );
+
+      const result = await runResolver({
+        cwd: tempDir,
         env: {
-          HOME: windows ? path.join(home, "wrong-home") : home,
+          CLAW_1PASSWORD_OP: process.execPath,
+          HOME: path.join(tempDir, "wrong-home"),
           ...directories,
-          OP_ACCOUNT: "must-not-reach-op",
         },
-      },
-    );
-    expect(result).toMatchObject({ code: 0, stderr: "" });
-    expect(JSON.parse(result.stdout)).toEqual({
-      protocolVersion: 1,
-      values: { [id]: JSON.stringify(expected) + " \t" },
-      errors: {},
-    });
-  });
+      });
+
+      expect(result).toMatchObject({ code: 0, stderr: "" });
+      expect(JSON.parse(JSON.parse(result.stdout).values[secretId])).toEqual({
+        ...directories,
+        serviceAccount: true,
+      });
+    },
+  );
+
   it("escapes shorthand ids that begin with the opaque encoding prefix", async () => {
     const nativeRef = "opb64:team/item/field";
     const encodedId = encodeOnePasswordSecretId(nativeRef);
@@ -360,24 +392,140 @@ describe("1Password SecretRef resolver", () => {
     expectFailure(await runResolver({ env: { CLAW_1PASSWORD_OP: process.execPath }, token }));
   });
 
-  it.each([
-    {
-      body: "setInterval(() => {}, 1000);",
-      message: `op read timed out after ${TEST_OP_READ_TIMEOUT_MS}ms.`,
-    },
-    {
-      body: 'process.stdout.write("x".repeat(70 * 1024));',
-      message: "op read output exceeded the limit.",
-    },
-  ])(
-    "reports $message",
-    async ({ body, message }) => {
-      const result = await runOp(body, { resolverExecutablePath: timeoutResolverPath });
-      expectError(result, message);
+  it(
+    "kills the op process tree when a read times out",
+    async ({ signal }) => {
+      const tempDir = fixtureWorkspace.dir;
+      const descendantPidPath = path.join(tempDir, "timed-out-descendant.pid");
+      const descendantBody = `import fs from "node:fs";
+${fixtureReceiptClientSource(receipts.endpoint)}
+process.on("SIGTERM", () => {});
+fs.writeFileSync(${JSON.stringify(`${descendantPidPath}.tmp`)}, String(process.pid));
+fs.renameSync(${JSON.stringify(`${descendantPidPath}.tmp`)}, ${JSON.stringify(descendantPidPath)});
+sendReceipt(${JSON.stringify(descendantPidPath)}, "ready");
+setInterval(() => {}, 1000);
+`;
+      let opPath = process.execPath;
+      if (process.platform === "win32") {
+        const opBody = `const { spawn } = require("node:child_process");
+spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(descendantBody)}], { stdio: "ignore" });
+setInterval(() => {}, 1000);
+`;
+        fs.writeFileSync(path.join(tempDir, "read"), opBody);
+      } else {
+        // Executable trust validation requires the literal shebang path to be canonical.
+        const shellPath = fs.realpathSync("/bin/sh");
+        const descendantPath = path.join(tempDir, "descendant.mjs");
+        opPath = path.join(tempDir, "op");
+        fs.writeFileSync(descendantPath, descendantBody);
+        fs.writeFileSync(
+          opPath,
+          `#!${shellPath}
+${JSON.stringify(trustedNodePath)} ${JSON.stringify(descendantPath)} &
+while true; do sleep 1; done
+`,
+          { mode: 0o755 },
+        );
+      }
+
+      const resultPromise = runResolver({
+        cwd: tempDir,
+        env: { CLAW_1PASSWORD_OP: opPath },
+        resolverExecutablePath: timeoutResolverPath,
+      });
+      let descendantPid: number | undefined;
+      try {
+        // The PID record precedes the receipt, but the resolver's exit uses another pipe.
+        // If exit wins, the durable record still proves SIGTERM immunity was installed.
+        await withinTest(
+          Promise.race([
+            receipts.waitFor(descendantPidPath, "ready"),
+            resultPromise.then((result) => {
+              if (!fs.existsSync(descendantPidPath)) {
+                throw new Error(
+                  `Resolver exited before the descendant was ready: ${JSON.stringify(result)}`,
+                );
+              }
+            }),
+          ]),
+          signal,
+        );
+        const pid = Number(fs.readFileSync(descendantPidPath, "utf8"));
+        descendantPid = pid;
+        expect(Number.isInteger(pid) && pid > 0).toBe(true);
+        const result = await withinTest(resultPromise, signal);
+        expectError(result, `op read timed out after ${TEST_OP_READ_TIMEOUT_MS}ms.`);
+        await expectExited(pid);
+      } finally {
+        // Join resolver-owned cleanup even when the test aborts before readiness arrives.
+        await resultPromise;
+        if (descendantPid === undefined && fs.existsSync(descendantPidPath)) {
+          descendantPid = Number(fs.readFileSync(descendantPidPath, "utf8"));
+        }
+        if (descendantPid && isProcessAlive(descendantPid)) {
+          process.kill(descendantPid, "SIGKILL");
+        }
+      }
     },
     process.platform === "win32" ? 30_000 : 15_000,
   );
+
   describe.runIf(process.platform !== "win32")("POSIX op execution", () => {
+    it("uses op read with native 1Password secret references", async () => {
+      const tempDir = fixtureWorkspace.dir;
+      const logPath = path.join(tempDir, "op-args.json");
+      const result = await runOp(
+        `const fs = require("node:fs");
+fs.writeFileSync(${JSON.stringify(logPath)}, JSON.stringify({
+  args: process.argv.slice(2),
+  biometric: process.env.OP_BIOMETRIC_UNLOCK_ENABLED,
+  loadDesktopSettings: process.env.OP_LOAD_DESKTOP_APP_SETTINGS,
+  account: process.env.OP_ACCOUNT,
+  serviceAccount: process.env.OP_SERVICE_ACCOUNT_TOKEN === "not-a-real-service-account-token",
+}));
+process.stdout.write("not-a-real-value \\t");
+`,
+        {
+          env: {
+            OP_ACCOUNT: "should-not-reach-op",
+          },
+        },
+      );
+
+      expect(result).toMatchObject({ code: 0, stderr: "" });
+      expect(JSON.parse(result.stdout)).toEqual({
+        protocolVersion: 1,
+        values: {
+          [secretId]: "not-a-real-value \t",
+        },
+        errors: {},
+      });
+      expect(JSON.parse(fs.readFileSync(logPath, "utf8"))).toEqual({
+        args: ["read", "--cache=false", "--no-newline", "op://Engineering/OpenRouter/apiKey"],
+        biometric: "false",
+        loadDesktopSettings: "false",
+        serviceAccount: true,
+      });
+    });
+
+    it("waits for inherited op stdout to close before returning the secret", async () => {
+      const result = await runOp(
+        `const { spawn } = require("node:child_process");
+spawn(process.execPath, ["-e", "setTimeout(() => process.stdout.write('tail'), 50)"], {
+  stdio: ["ignore", process.stdout, "ignore"],
+});
+process.stdout.write("head");
+`,
+        {
+          ids: ["Engineering/OpenRouter/apiKey"],
+        },
+      );
+
+      expect(JSON.parse(result.stdout).values).toEqual({
+        "Engineering/OpenRouter/apiKey": "headtail",
+      });
+    });
+
     it("rejects a symlinked broker token file", async () => {
       const stateDir = fixtureWorkspace.dir;
       const tokenDir = path.join(stateDir, "credentials", "onepassword");
@@ -486,6 +634,33 @@ process.exitCode = 1;
         "fixture-private-password",
       ]) {
         expect(result.stdout).not.toContain(hidden);
+      }
+    });
+
+    it("kills the op process tree when output exceeds the limit", async () => {
+      const tempDir = fixtureWorkspace.dir;
+      const descendantPidPath = path.join(tempDir, "descendant.pid");
+
+      let descendantPid: number | undefined;
+      try {
+        const result = await runOp(`const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const descendant = spawn(process.execPath, ["-e", ${JSON.stringify(`process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);`)}], { stdio: "ignore" });
+descendant.once("spawn", () => {
+  fs.writeFileSync(${JSON.stringify(descendantPidPath)}, String(descendant.pid));
+  process.stdout.write("x".repeat(70 * 1024));
+});
+setInterval(() => {}, 1000);
+`);
+        expectError(result, "op read output exceeded the limit.");
+        const pid = Number.parseInt(fs.readFileSync(descendantPidPath, "utf8"), 10);
+        descendantPid = pid;
+        expect(pid).toBeGreaterThan(0);
+        await expectExited(pid);
+      } finally {
+        if (descendantPid && isProcessAlive(descendantPid)) {
+          process.kill(descendantPid, "SIGKILL");
+        }
       }
     });
 

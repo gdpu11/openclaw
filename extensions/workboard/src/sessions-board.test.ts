@@ -281,6 +281,7 @@ it("classifies custom conjunctions, alternatives, and unknown PR state", async (
       ["failed", { run: "failed" }, "review"],
     ],
   );
+  expect(read.columns.map((column) => column.id)).toEqual(["review", "active", "no-pr", "other"]);
   expect(read.warning).toContain("Pull-request facts for 1 session are not loaded yet.");
   expect(read.sessions.find((session) => session.label === "unknown")?.reason).toBe(
     "facts-unavailable",
@@ -297,6 +298,7 @@ it("classifies default rule priority for unobserved runs and PRs", async () => {
     ["merged", { pullRequests: pr(2, "merged") }, "merged"],
     ["idle", {}, "done"],
   ]);
+  expect(read.columns.map((column) => column.id)).toEqual(DEFAULT_COLUMNS);
   expect(read.warning).toBeUndefined();
 });
 

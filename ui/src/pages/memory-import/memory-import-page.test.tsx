@@ -230,7 +230,16 @@ describe("MemoryImportPage", () => {
         handlers["migrations.memory.apply"] = () => ({
           ...createApplyResult(),
           summary: { ...emptySummary, errors: 1 },
-          items: [],
+          items: [
+            {
+              id: "memory:codex:MEMORY.md",
+              status: "error",
+              reason: "replacement interrupted",
+              details: {
+                recoveryRecordPath: "/tmp/migration-report/recovery-required.json",
+              },
+            },
+          ],
           reportDir: "/tmp/migration-report",
         });
       }
@@ -245,6 +254,7 @@ describe("MemoryImportPage", () => {
       flush();
       expect(request).toHaveBeenCalledTimes(before);
       if (afterApply) {
+        expect(page.textContent).toContain("replacement interrupted");
         expect(page.textContent).toContain("/tmp/migration-report");
         expect(button("import-provider-button")?.disabled).toBe(true);
       }
@@ -450,12 +460,15 @@ describe("MemoryImportPage", () => {
     },
   );
 
-  it.each(["import", "backfill"] as const)(
+  it.each(["plan", "import", "backfill"] as const)(
     "shows the next agent while the retired %s request is still pending",
     async (operation) => {
       const pending = createDeferredCore<unknown>();
       Object.assign(handlers, {
-        "migrations.memory.plan": (params: { agentId?: string }) => createPlan(params.agentId),
+        "migrations.memory.plan": (params: { agentId?: string }) =>
+          operation === "plan" && params.agentId === "research"
+            ? pending.promise
+            : createPlan(params.agentId),
         "migrations.memory.apply": () => pending.promise,
         "memory.sessionBackfill.apply": () => pending.promise,
       });
@@ -464,7 +477,7 @@ describe("MemoryImportPage", () => {
       if (operation === "import") {
         (await openImport()).click();
         await ready("import-confirm", true);
-      } else {
+      } else if (operation === "backfill") {
         await ready("backfill-apply", false);
         button("backfill-apply")!.click();
         await ready("backfill-apply", true);
@@ -478,10 +491,17 @@ describe("MemoryImportPage", () => {
         expect(button("import-confirm")).toBeNull();
       });
       await ready("import-provider-button", false);
-      pending.resolve(operation === "import" ? createApplyResult() : backfillChunk());
+      pending.resolve(
+        operation === "plan"
+          ? createPlan()
+          : operation === "import"
+            ? createApplyResult()
+            : backfillChunk(),
+      );
       await pending.promise;
       flush();
       expect(page.textContent).toContain("/tmp/openclaw-writer");
+      expect(page.textContent).not.toContain("/tmp/openclaw-research");
       if (operation === "import") {
         expect(request.mock.calls.at(-1)?.[1]).toEqual({ agentId: "writer", overwrite: false });
         page.querySelector<HTMLInputElement>('input[role="switch"]')!.click();

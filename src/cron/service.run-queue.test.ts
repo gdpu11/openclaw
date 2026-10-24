@@ -1,5 +1,4 @@
 import path from "node:path";
-import { expectDefined } from "@openclaw/normalization-core";
 import { expect, it, vi } from "vitest";
 import { observeCronJobCommits } from "../../test/helpers/cron/runtime-mutation.js";
 import { createDueIsolatedJob } from "../../test/helpers/cron/service-regression-fixtures.js";
@@ -16,6 +15,7 @@ import {
 import { withAgentDatabaseStartupAdmission } from "../state/agent-database-startup.js";
 import { openOpenClawAgentDatabase } from "../state/openclaw-agent-db.js";
 import type { OpenClawDatabaseSchemaPreflight } from "../state/openclaw-database-preflight.types.js";
+import * as stateRead from "../state/openclaw-state-db-readonly.js";
 import { runOpenClawStateWriteTransaction } from "../state/openclaw-state-db.js";
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
 import * as stateWorker from "../state/openclaw-state-worker-store.js";
@@ -35,10 +35,13 @@ import {
 import {
   commitCronRunRequests,
   drainCronRunQueue,
+  stopCronRunQueue,
   waitForCronRunQueue,
 } from "./service/run-queue.js";
-import type { CronServiceDeps } from "./service/state.js";
+import { runCronSchedulerMaintenance } from "./service/scheduler-maintenance.js";
+import { createCronServiceState, type CronServiceDeps } from "./service/state.js";
 import { onTimer } from "./service/timer.test-support.js";
+import * as cronStore from "./store.js";
 import { loadCronStore, saveCronStore } from "./store.js";
 import { createCronScheduledRunId } from "./store/run-request-id.js";
 import { cronStreamScheduleKey } from "./stream-schedule.js";
@@ -160,16 +163,76 @@ function commandJob(id: string, nextRunAtMs = NOW + 60_000): CronJob {
   };
 }
 
-it.for(["startup", "scheduled"] as const)(
-  "keeps preparing jobs queued without blocking initialization or a healthy agent: %s",
+it("finishes cron initialization while missed command jobs await their agents", async ({
+  signal,
+}) => {
+  const jobs = ["never-ready", "later-ready"].map((agentId) =>
+    Object.assign(commandJob(agentId, NOW - 1_000), { agentId }),
+  );
+  const storePath = await storeJobs(jobs);
+  await withAgentDatabaseStartupAdmission(async (admission) => {
+    const { lifetime, env, inspections } = deferAdmission(
+      admission,
+      jobs.map((job) => job.agentId),
+    );
+    const finished = createFinishedBarrier();
+    const laterFinished = finished.waitForOk("later-ready");
+    const runCommandJob = successfulCommand();
+    const { cron, state } = service(storePath, { runCommandJob, onEvent: finished.onEvent });
+    const receipts = () =>
+      runOpenClawStateWriteTransaction(({ db }) =>
+        db
+          .prepare(
+            "SELECT job_id, receipt_id, status FROM cron_run_receipts WHERE store_key = ? ORDER BY job_id",
+          )
+          .all(storePath),
+      );
+    const starting = cron.start();
+    try {
+      await withinTest(starting, signal);
+      expect(runCommandJob).not.toHaveBeenCalled();
+      expect((await loadCronStore(storePath)).jobs.map((job) => job.state)).toEqual([
+        expect.objectContaining({ queuedAtMs: NOW }),
+        expect.objectContaining({ queuedAtMs: NOW }),
+      ]);
+      const queuedReceipts = receipts();
+      expect(queuedReceipts).toEqual([
+        { job_id: "later-ready", receipt_id: expect.any(String), status: "running" },
+        { job_id: "never-ready", receipt_id: expect.any(String), status: "running" },
+      ]);
+
+      inspections[1]!.resolve(ready);
+      await withinTest(laterFinished, signal);
+      await drainCronRunQueue(state);
+      expect(runCommandJob).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ job: expect.objectContaining({ id: "later-ready" }) }),
+      );
+      expect(receipts()).toEqual([{ ...queuedReceipts[0], status: "ok" }, queuedReceipts[1]]);
+      const neverReady = (await loadCronStore(storePath)).jobs.find(
+        (job) => job.id === "never-ready",
+      );
+      expect(neverReady?.state.queuedAtMs).toBe(NOW);
+      expect(neverReady?.state.runningAtMs).toBeUndefined();
+    } finally {
+      cron.stop();
+      for (const inspection of inspections) {
+        inspection.resolve(ready);
+      }
+      await Promise.all([starting, cron.waitForIdle(), lifetime.stop()]);
+      recordAgentDatabaseAdmissions([], { env, source: "startup" });
+    }
+  });
+});
+
+it.for(["manual", "scheduled"] as const)(
+  "keeps service-scoped preparing jobs queued while a healthy agent runs: %s",
   async (source, { signal }) => {
     const slowJobs = Array.from({ length: 8 }, (_, index) => ({
-      ...commandJob(`slow-${index}`, NOW - 1_000),
+      ...commandJob(`slow-${index}`, NOW),
       agentId: "preparing",
     }));
-    const healthyJob = commandJob("healthy", NOW - 1_000);
-    const jobs = [...slowJobs, healthyJob];
-    const storePath = await storeJobs(jobs);
+    const healthyJob = commandJob("healthy", NOW);
+    const storePath = await storeJobs([...slowJobs, healthyJob]);
     await withAgentDatabaseStartupAdmission(async (admission) => {
       const env = {
         ...process.env,
@@ -178,83 +241,82 @@ it.for(["startup", "scheduled"] as const)(
       const {
         refusals: refusal,
         lifetime,
-        inspections,
-      } = deferAdmission(admission, ["preparing", "main"], env);
-      const [inspection, healthyInspection] = inspections;
-      const healthy = gatedCommand();
-      const finished = createFinishedBarrier();
-      const healthyFinished = finished.waitForOk(healthyJob.id);
-      const allFinished = Promise.all(slowJobs.map((job) => finished.waitForOk(job.id)));
+        inspection,
+      } = deferAdmission(admission, ["preparing"], env);
+      const healthyStarted = createDeferred();
+      const healthyRelease = createDeferred();
       const ran: string[] = [];
       const { cron, state } = service(storePath, {
         env,
-        onEvent: finished.onEvent,
         isAgentAvailable: (agentId) => !readAgentDatabaseAdmissionRefusal(agentId, { env }),
         runCommandJob: async ({ job }) => {
           ran.push(job.id);
           if (job.id === healthyJob.id) {
-            await healthy.runCommandJob();
+            healthyStarted.resolve();
+            await healthyRelease.promise;
           }
           return { status: "ok" };
         },
       });
-      let completed: Promise<unknown> | undefined;
       try {
-        if (source !== "startup") {
-          healthyInspection!.resolve(ready);
-        }
-        completed = source === "startup" ? cron.start() : onTimer(state);
+        const requests =
+          source === "manual"
+            ? await commitCronRunRequests(state, [...slowJobs, healthyJob], {
+                source,
+                mode: "force",
+              })
+            : [];
+        const completed =
+          source === "scheduled"
+            ? onTimer(state)
+            : drainCronRunQueue(state).then(async () => {
+                await Promise.all(requests.map((request) => request.completion));
+              });
         void completed.catch(() => {});
-        if (source === "startup") {
-          await withinTest(completed, signal);
-          expect(ran).toEqual([]);
-          expect((await loadCronStore(storePath)).jobs.map((job) => job.state.queuedAtMs)).toEqual(
-            jobs.map(() => NOW),
-          );
-          healthyInspection!.resolve(ready);
+        if (source === "manual") {
+          await drainCronRunQueue(state);
+        } else {
+          await withinTest(healthyStarted.promise, signal);
         }
-        await withinTest(healthy.entered.promise, signal);
+        const queued = (await loadCronStore(storePath)).jobs;
+        expect(
+          queued
+            .filter((job) => job.agentId === "preparing")
+            .every(
+              (job) => job.state.queuedAtMs !== undefined && job.state.runningAtMs === undefined,
+            ),
+        ).toBe(true);
+        await withinTest(healthyStarted.promise, signal);
         expect(ran).toEqual([healthyJob.id]);
-        const queued = (await loadCronStore(storePath)).jobs.filter(
-          (job) => job.agentId === "preparing",
-        );
-        expect(queued.map((job) => [job.state.queuedAtMs, job.state.runningAtMs])).toEqual(
-          slowJobs.map(() => [NOW, undefined]),
-        );
-        healthy.release.resolve();
-        await withinTest(healthyFinished, signal);
-        await drainCronRunQueue(state);
         // A different service can still be preparing the same agent id.
         recordAgentDatabaseAdmissions(
-          refusal
-            .filter((entry) => entry.agentId === "preparing")
-            .map((entry) => createAgentDatabaseInspectionRefusal({ ...entry, pending: true })),
+          refusal.map((entry) => createAgentDatabaseInspectionRefusal({ ...entry, pending: true })),
           { source: "startup" },
         );
-        inspection!.resolve(ready);
-        await withinTest(Promise.all([completed, allFinished]), signal);
+        healthyRelease.resolve();
+        inspection.resolve(ready);
+        await withinTest(completed, signal);
         expect(ran).toEqual([healthyJob.id, ...slowJobs.map((job) => job.id)]);
       } finally {
-        healthy.release.resolve();
-        inspections.forEach((entry) => entry.resolve(ready));
+        healthyRelease.resolve();
+        inspection.resolve(ready);
         cron.stop();
         await Promise.all([cron.waitForIdle(), lifetime.stop()]);
         recordAgentDatabaseAdmissions([], { source: "startup" });
-        recordAgentDatabaseAdmissions([], { env, source: "startup" });
       }
     });
   },
 );
 
 it.for([
-  { outcome: "ready", error: undefined, stopped: false },
-  { outcome: "inspection-failed", error: "synthetic terminal inspection failure", stopped: false },
-  { outcome: "ownership-lost", error: "Gateway no longer owns preparation", stopped: false },
-  { outcome: "service-stopped", error: undefined, stopped: true },
-  { outcome: "gateway-stopped", error: undefined, stopped: true },
-])(
-  "retains cron custody beyond the foreground admission budget: $outcome",
-  async ({ outcome, error, stopped }, { signal }) => {
+  "ready",
+  "inspection-failed",
+  "ownership-lost",
+  "service-stopped",
+  "gateway-stopped",
+] as const)(
+  "retains cron custody beyond the foreground admission budget: %s",
+  async (outcome, { signal }) => {
     const job = { ...commandJob("slow-startup"), agentId: "preparing" };
     const storePath = await storeJobs([job]);
     await withAgentDatabaseStartupAdmission(async (admission) => {
@@ -275,11 +337,13 @@ it.for([
       const runCommandJob = successfulCommand();
       const { cron, state } = service(storePath, { runCommandJob });
       try {
-        const requests = await commitCronRunRequests(state, [job], {
+        const [request] = await commitCronRunRequests(state, [job], {
           source: "manual",
           mode: "force",
         });
-        const request = expectDefined(requests[0], "queued cron request");
+        if (!request) {
+          throw new Error("Expected the queued cron request");
+        }
         const receiptStatus = () => readReceipt(request.runReceipt.receiptId);
         vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
         await drainCronRunQueue(state);
@@ -296,33 +360,39 @@ it.for([
         expect(queued?.runningAtMs).toBeUndefined();
         expect(runCommandJob).not.toHaveBeenCalled();
 
-        if (outcome === "service-stopped") {
-          cron.stop();
-        } else if (outcome === "gateway-stopped") {
-          const stopping = lifetime.stop();
-          inspection.resolve(ready);
-          await stopping;
-        } else if (outcome === "inspection-failed") {
-          inspection.reject(new Error(error));
-        } else {
-          ownsPreparation = outcome !== "ownership-lost";
-          inspection.resolve(ready);
-        }
-        if (error) {
-          await expect(withinTest(request.completion, signal)).rejects.toThrow(error);
-        } else {
-          const result = await withinTest(request.completion, signal);
-          if (stopped) {
-            expect(result).toMatchObject({ ran: false, reason: "stopped" });
+        if (outcome === "service-stopped" || outcome === "gateway-stopped") {
+          if (outcome === "service-stopped") {
+            cron.stop();
+          } else {
+            const stopped = lifetime.stop();
+            inspection.resolve(ready);
+            await stopped;
           }
-        }
-        await withinTest(waitForCronRunQueue(state), signal);
-        expect(receiptStatus()).toEqual({ status: stopped ? "running" : error ? "skipped" : "ok" });
-        expect((await loadCronStore(storePath)).jobs[0]?.state.queuedAtMs).toBe(
-          stopped ? NOW : undefined,
-        );
-        expect(runCommandJob).toHaveBeenCalledTimes(outcome === "ready" ? 1 : 0);
-        if (!stopped) {
+          await withinTest(waitForCronRunQueue(state), signal);
+          expect(await request.completion).toMatchObject({ ran: false, reason: "stopped" });
+          expect(receiptStatus()).toEqual({ status: "running" });
+          expect((await loadCronStore(storePath)).jobs[0]?.state.queuedAtMs).toBe(NOW);
+          expect(runCommandJob).not.toHaveBeenCalled();
+        } else {
+          if (outcome === "inspection-failed") {
+            inspection.reject(new Error("synthetic terminal inspection failure"));
+          } else {
+            ownsPreparation = outcome !== "ownership-lost";
+            inspection.resolve(ready);
+          }
+          if (outcome === "ready") {
+            await withinTest(request.completion, signal);
+          } else {
+            await expect(withinTest(request.completion, signal)).rejects.toThrow(
+              outcome === "inspection-failed"
+                ? "synthetic terminal inspection failure"
+                : "Gateway no longer owns preparation",
+            );
+          }
+          await withinTest(waitForCronRunQueue(state), signal);
+          expect(receiptStatus()).toEqual({ status: outcome === "ready" ? "ok" : "skipped" });
+          expect(runCommandJob).toHaveBeenCalledTimes(outcome === "ready" ? 1 : 0);
+          expect((await loadCronStore(storePath)).jobs[0]?.state.queuedAtMs).toBeUndefined();
           await drainCronRunQueue(state);
           expect(runCommandJob).toHaveBeenCalledTimes(outcome === "ready" ? 1 : 0);
         }
@@ -344,15 +414,19 @@ it.for(["complete", "cancel", "lost-result"] as const)(
     const job = { ...commandJob("exit-wait"), schedule };
     const unrelated = commandJob("unrelated-wait");
     const storePath = await storeJobs([job, unrelated]);
-    const target = gatedCommand();
-    const other = gatedCommand();
+    const targetEntered = createDeferred();
+    const unrelatedEntered = createDeferred();
+    const releaseTarget = createDeferred();
+    const releaseUnrelated = createDeferred();
     const accepted = createDeferred();
     let targetRuns = 0;
     const runCommandJob = vi.fn(async ({ job: current }: { job: CronJob }) => {
       if (current.id === unrelated.id) {
-        await other.runCommandJob();
+        unrelatedEntered.resolve();
+        await releaseUnrelated.promise;
       } else if (++targetRuns === 1) {
-        await target.runCommandJob();
+        targetEntered.resolve();
+        await releaseTarget.promise;
       }
       return { status: "ok" as const };
     });
@@ -365,8 +439,9 @@ it.for(["complete", "cancel", "lost-result"] as const)(
     try {
       const first = cron.run(job.id, "force");
       void first.catch(() => {});
-      pending.push(first, cron.run(unrelated.id, "force"));
-      await withinTest(Promise.all([target.entered.promise, other.entered.promise]), signal);
+      const other = cron.run(unrelated.id, "force");
+      pending.push(first, other);
+      await withinTest(Promise.all([targetEntered.promise, unrelatedEntered.promise]), signal);
       if (outcome === "lost-result") {
         const execute = stateWorker.executeOpenClawStateWorker;
         const finalization = vi
@@ -392,37 +467,85 @@ it.for(["complete", "cancel", "lost-result"] as const)(
           ran: false,
           reason: "stopped",
         });
-        target.release.resolve();
+        releaseTarget.resolve();
         await withinTest(first, signal);
+        expect(targetRuns).toBe(1);
       } else if (outcome === "lost-result") {
-        target.release.resolve();
+        releaseTarget.resolve();
         await expect(withinTest(first, signal)).rejects.toThrow("synthetic terminal write failure");
         await expect(withinTest(exit, signal)).resolves.toMatchObject({
           ok: true,
           ran: false,
           reason: "already-running",
         });
+        expect(targetRuns).toBe(1);
       } else {
-        target.release.resolve();
+        releaseTarget.resolve();
         await withinTest(accepted.promise, signal);
         await expect(withinTest(exit, signal)).resolves.toMatchObject({ ok: true, ran: true });
+        expect(targetRuns).toBe(2);
       }
-      expect(targetRuns).toBe(outcome === "complete" ? 2 : 1);
       expect((await cron.readJob(unrelated.id))?.state.runningAtMs).toBeDefined();
     } finally {
       controller.abort();
       restoreFinalization?.();
-      target.release.resolve();
-      other.release.resolve();
+      releaseTarget.resolve();
+      releaseUnrelated.resolve();
       await Promise.allSettled(pending);
       await stopServices(cron, sibling);
     }
   },
 );
 
-it("preserves owned work on repeated start and joins it after scheduler cleanup fails", async ({
-  signal,
-}) => {
+it("keeps owned running work out of recovery and queue database polling", async ({ signal }) => {
+  const job = commandJob("owned-running");
+  const storePath = await storeJobs([job]);
+  const { entered, release, runCommandJob } = gatedCommand();
+  const { cron, state } = service(storePath, { runCommandJob });
+  let completion: Promise<unknown> | undefined;
+  let restoreLoads: (() => void) | undefined;
+  try {
+    await cron.start();
+    const loads = vi.spyOn(cronStore, "loadCronJobsStoreWithConfigJobs");
+    restoreLoads = () => loads.mockRestore();
+    completion = cron.run(job.id, "force");
+    await withinTest(
+      awaitGateBeforeSettlement(entered.promise, completion, "owned run did not start"),
+      signal,
+    );
+    // Manual admission and queue activation reuse the loaded store and committed postimages.
+    expect(loads).not.toHaveBeenCalled();
+    await cron.start();
+    const running = await cron.readJob(job.id);
+    expect(running).toMatchObject({
+      state: { runningAtMs: NOW, runningReceiptId: expect.any(String) },
+    });
+    expect(running?.state.lastError).toBeUndefined();
+    expect(loads).not.toHaveBeenCalled();
+    loads.mockRestore();
+    // Consume the queue's committed publication once, then the loaded owner is current.
+    await runCronSchedulerMaintenance(state);
+    await drainCronRunQueue(state);
+    const reads = vi.spyOn(stateRead, "executeExistingOpenClawStateRead");
+    const writes = vi.spyOn(stateWorker, "runOpenClawStateWorkerOperation");
+    try {
+      await runCronSchedulerMaintenance(state);
+      await drainCronRunQueue(state);
+      expect(reads).not.toHaveBeenCalled();
+      expect(writes).not.toHaveBeenCalled();
+    } finally {
+      reads.mockRestore();
+      writes.mockRestore();
+    }
+  } finally {
+    restoreLoads?.();
+    release.resolve();
+    await completion;
+    await stopServices(cron);
+  }
+});
+
+it("joins a running job before restarting after scheduler cleanup fails", async ({ signal }) => {
   const job = commandJob("restart-after-cleanup");
   const storePath = await storeJobs([job]);
   const { entered, release, runCommandJob } = gatedCommand();
@@ -435,10 +558,6 @@ it("preserves owned work on repeated start and joins it after scheduler cleanup 
     const running = cron.run(job.id, "force");
     pending.push(running);
     await withinTest(entered.promise, signal);
-    await cron.start();
-    const active = await cron.readJob(job.id);
-    expect(active?.state).toMatchObject({ runningAtMs: NOW, runningReceiptId: expect.any(String) });
-    expect(active?.state.lastError).toBeUndefined();
     const stopScope = state.schedulerScope.stop.bind(state.schedulerScope);
     const stop = vi.spyOn(state.schedulerScope, "stop").mockImplementationOnce(async () => {
       await stopScope();
@@ -475,6 +594,8 @@ it("shares capacity across sibling services for timer, manual, stream, and consu
   const timerRequested = createDeferred();
   const blockers = Array.from({ length: 8 }, (_, index) => commandJob(`blocker-${index}`));
   const manual = commandJob("queued-manual");
+  const disabled = commandJob("queued-disabled");
+  const removed = commandJob("queued-removed");
   const timed = commandJob("queued-timer", NOW + 10_000);
   const exitSchedule = { kind: "on-exit" as const, command: "synthetic-watch" };
   const exit: CronJob = { ...commandJob("queued-exit"), schedule: exitSchedule, state: {} };
@@ -485,7 +606,7 @@ it("shares capacity across sibling services for timer, manual, stream, and consu
     payload: { kind: "agentTurn", message: "configured stream payload" },
     state: { streamSourceIdentity: "synthetic-source" },
   };
-  const storePath = await storeJobs([...blockers, manual, timed, stream, exit]);
+  const storePath = await storeJobs([...blockers, manual, disabled, removed, timed, stream, exit]);
   let active = 0;
   let peakActive = 0;
   let blockersStarted = 0;
@@ -539,6 +660,23 @@ it("shares capacity across sibling services for timer, manual, stream, and consu
     );
     const manualAck = await cron.enqueueRun(manual.id, "force");
     expect(manualAck).toMatchObject({ ok: true, enqueued: true });
+    for (const [job, remove] of [
+      [disabled, false],
+      [removed, true],
+    ] as const) {
+      const ack = await sibling.enqueueRun(job.id, "force");
+      if (!ack.ok || !("runId" in ack)) {
+        throw new Error("Expected a queued request before cancellation");
+      }
+      if (remove) {
+        await cron.remove(job.id);
+      } else {
+        await cron.update(job.id, { enabled: false });
+      }
+      expect(await sibling.waitForManualRun(ack.runId, 60_000, signal)).toBe(true);
+      expect(active).toBe(8);
+      expect(executed).toEqual([]);
+    }
     const streamRun = sibling.run(stream.id, "force", {
       payload: { kind: "agentTurn", message: "accepted stream payload" },
       streamBatch: "line one\nline two",
@@ -618,16 +756,22 @@ it("retires a stale markerless receipt at startup so the job can run again", asy
       "UPDATE cron_jobs SET state_json = json_remove(state_json, '$.runningAtMs', '$.runningReceiptId') WHERE store_key = ? AND job_id = ?",
     ).run(storePath, job.id);
   });
-  expect(readReceipt(receiptId)).toEqual({ status: "running" });
+  const readOldReceipt = () =>
+    runOpenClawStateWriteTransaction(({ db }) =>
+      db
+        .prepare("SELECT receipt_id, status FROM cron_run_receipts WHERE receipt_id = ?")
+        .get(receiptId),
+    );
+  expect(readOldReceipt()).toEqual({ receipt_id: receiptId, status: "running" });
   const runCommandJob = successfulCommand();
   const { cron } = service(storePath, { runCommandJob });
   try {
     await cron.start();
-    expect(readReceipt(receiptId)).toEqual({ status: "interrupted" });
+    expect(readOldReceipt()).toEqual({ receipt_id: receiptId, status: "interrupted" });
     expect(runCommandJob).not.toHaveBeenCalled();
     expect(await cron.run(job.id, "force")).toEqual({ ok: true, ran: true });
     expect(runCommandJob).toHaveBeenCalledOnce();
-    expect(readReceipt(receiptId)).toEqual({ status: "interrupted" });
+    expect(readOldReceipt()).toEqual({ receipt_id: receiptId, status: "interrupted" });
     expect((await loadCronStore(storePath)).jobs[0]?.state.lastRunStatus).toBe("ok");
   } finally {
     await stopServices(cron);
@@ -639,24 +783,38 @@ it("contains recovered scheduled launch failures without an unhandled rejection"
   const storePath = await storeJobs([job]);
   const receiptId = createCronScheduledRunId(storePath, job.id, NOW);
   await requestStoredRun(storePath, job, receiptId, true);
-  const { cron, state } = service(storePath, {
-    runSchedulerOwned: async () => {
-      throw new Error("scheduler owner is retired");
-    },
-  });
+  const failure = new Error("scheduler owner is retired");
+  const scheduler = createTestGatewayScheduler();
+  const state = createCronServiceState(
+    serviceDeps(storePath, {
+      scheduler,
+      runSchedulerOwned: async () => {
+        throw failure;
+      },
+    }),
+  );
   // Durable requests survive restart; this new owner has no caller completion to observe.
   state.store = await loadCronStore(storePath);
+  const unhandled: unknown[] = [];
+  const observe = (reason: unknown) => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", observe);
   try {
     await drainCronRunQueue(state);
     await waitForCronRunQueue(state);
     await new Promise<void>((resolve) => {
       setImmediate(resolve);
     });
-    // Vitest fails on unhandled rejections; the event-loop turn above exposes late ones.
+    expect(unhandled).toEqual([]);
     const persisted = (await loadCronStore(storePath)).jobs[0];
     expect(persisted?.state.queuedAtMs).toBeUndefined();
     expect(persisted?.state.runningAtMs).toBeUndefined();
   } finally {
-    await stopServices(cron);
+    process.off("unhandledRejection", observe);
+    state.stopped = true;
+    await stopCronRunQueue(state);
+    await waitForCronRunQueue(state);
+    await scheduler.stop();
   }
 });
