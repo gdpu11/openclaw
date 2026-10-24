@@ -578,9 +578,14 @@ describe("cold restart recovery of native operator input", () => {
           handledSessionKeys: new Set(),
           gatewayRuntime: runtime.recovery,
         });
+        const deviceRevoked = scenario === "device revoked after admission";
+        expect(result).toEqual({
+          ...settledRecovery,
+          settled: deviceRevoked ? 0 : 1,
+          failed: deviceRevoked ? 1 : 0,
+        });
+        expect(startTurn).toHaveBeenCalledTimes(sourceUnavailable ? 0 : 1);
         if (sourceMissing) {
-          expect(result).toEqual(settledRecovery);
-          expect(startTurn).not.toHaveBeenCalled();
           const entry = await readSessionEntryReadOnlyInWorker(fixture.target);
           expect(entry).toMatchObject({
             sessionId: fixture.entry.sessionId,
@@ -594,8 +599,6 @@ describe("cold restart recovery of native operator input", () => {
         } else if (sourceMismatch) {
           // Current Gateway restoration owns exact-claim validation, not the
           // transcript classifier. Refusal must precede turn/tool execution.
-          expect(result).toEqual(settledRecovery);
-          expect(startTurn).not.toHaveBeenCalled();
           const entry = await readSessionEntryReadOnlyInWorker(fixture.target);
           expect(entry?.lastRunError).toBe(
             "Restart recovery operator source no longer owns this input.",
@@ -603,18 +606,6 @@ describe("cold restart recovery of native operator input", () => {
           expect(entry?.mainRestartRecovery).toBeUndefined();
           expect(entry?.restartRecoveryOperatorSource).toBeUndefined();
           expect(entry?.abortedLastRun).toBe(false);
-        } else if (scenario.includes("after admission")) {
-          const revoked = scenario === "role reassigned after admission";
-          expect(result).toEqual({
-            started: 0,
-            settled: revoked ? 1 : 0,
-            failed: revoked ? 0 : 1,
-            skipped: 0,
-          });
-          expect(startTurn).toHaveBeenCalledOnce();
-        } else {
-          expect(result).toEqual(settledRecovery);
-          expect(startTurn).toHaveBeenCalledOnce();
         }
         const jobs = (await loadCronStore(cronStorePath)).jobs;
         if (sourceUnavailable || scenario.includes("after admission")) {

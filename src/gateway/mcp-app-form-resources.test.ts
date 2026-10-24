@@ -31,6 +31,23 @@ import * as sessionScopedRead from "./server-methods/session-scoped-read.js";
 import type { GatewayRequestHandlerOptions } from "./server-methods/types.js";
 
 const state = vi.hoisted(() => ({ root: "", current: true, uploads: true, apps: true }));
+
+function sessionFileFixture(params: { sessionKey: string; agentId?: string }, cfg: OpenClawConfig) {
+  const entry = { sessionId: "session-1", updatedAt: 0 };
+  return [
+    {
+      root: state.root,
+      canonicalKey: params.sessionKey,
+      agentId: params.agentId ?? "main",
+      storePath: state.root,
+      cfg,
+      entry,
+    },
+    () => {},
+    () => entry,
+  ] as const;
+}
+
 vi.mock("./operator-role-policy.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./operator-role-policy.js")>()),
   resolveGatewayOperatorRoleActor: () => undefined,
@@ -60,35 +77,10 @@ vi.mock("./question-session-access.js", () => ({
 vi.mock("./server-methods/sessions-files.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./server-methods/sessions-files.js")>()),
   withSessionFileRoot: async (
-    params: { sessionKey: string; agentId?: string },
+    params: Parameters<typeof sessionFileFixture>[0],
     cfg: OpenClawConfig,
-    consume: (
-      loaded: {
-        root: string;
-        canonicalKey: string;
-        agentId: string;
-        storePath: string;
-        cfg: OpenClawConfig;
-        entry: { sessionId: string; updatedAt: number };
-      },
-      assertCurrent: () => void,
-      readEntry: () => { sessionId: string; updatedAt: number },
-    ) => Promise<unknown>,
-  ) => {
-    const entry = { sessionId: "session-1", updatedAt: 0 };
-    return consume(
-      {
-        root: state.root,
-        canonicalKey: params.sessionKey,
-        agentId: params.agentId ?? "main",
-        storePath: state.root,
-        cfg,
-        entry,
-      },
-      () => {},
-      () => entry,
-    );
-  },
+    consume: (...args: ReturnType<typeof sessionFileFixture>) => Promise<unknown>,
+  ) => consume(...sessionFileFixture(params, cfg)),
 }));
 vi.mock("../agents/agent-bundle-mcp-manager-api.js", () => ({
   peekSessionMcpRuntime: () => undefined,
