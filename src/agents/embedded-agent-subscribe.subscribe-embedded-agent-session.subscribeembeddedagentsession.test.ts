@@ -106,28 +106,23 @@ function emitOrphanedVoice(emit: (event: unknown) => void) {
 it("delivers intact graphemes from 1-character provider deltas", async () => {
   const cluster = "👨‍👩‍👧‍👦";
   const source = `${"x".repeat(1195)}${cluster}done`;
-  const codePoints = Array.from(source);
   const { emit, subscription, onBlockReply } = blockReplyHarness({
     blockReplyBreak: "text_end",
     blockReplyChunking: { minChars: 800, maxChars: 1200, breakPreference: "paragraph" },
   });
-  try {
-    let text = "";
-    for (const delta of codePoints) {
-      text += delta;
-      emitResponsesText(emit, "text_delta", text, "grapheme-answer", delta);
-    }
-    emitResponsesText(emit, "text_end", source, "grapheme-answer");
-    emit({ type: "agent_end", messages: [], willRetry: false });
-    await subscription.waitForPendingEvents();
-    const chunks = onBlockReply.mock.calls.map(([reply]) => reply.text ?? "");
-    expect(chunks.length).toBeGreaterThan(1);
-    expect(chunks.join("")).toBe(source);
-    expect(chunks.filter((chunk) => chunk.includes(cluster))).toHaveLength(1);
-    expect(chunks.every((chunk) => chunk.length <= 1200)).toBe(true);
-  } finally {
-    subscription.unsubscribe();
+  let text = "";
+  for (const delta of Array.from(source)) {
+    text += delta;
+    emitResponsesText(emit, "text_delta", text, "grapheme-answer", delta);
   }
+  emitResponsesText(emit, "text_end", source, "grapheme-answer");
+  emit({ type: "agent_end", messages: [], willRetry: false });
+  await subscription.waitForPendingEvents();
+  const chunks = onBlockReply.mock.calls.map(([reply]) => reply.text ?? "");
+  expect(chunks.length).toBeGreaterThan(1);
+  expect(chunks.join("")).toBe(source);
+  expect(chunks.filter((chunk) => chunk.includes(cluster))).toHaveLength(1);
+  expect(chunks.every((chunk) => chunk.length <= 1200)).toBe(true);
 });
 
 function createAgentEventHarness(
@@ -284,9 +279,9 @@ it("does not attach generated image media to an early streamed chunk before expl
   emitAssistantTextDelta(emit, "Generated 1 image.\n");
   await subscription.waitForPendingEvents();
   expectBlockReplyPayload(onBlockReply, { text: "Generated 1 image." });
-  const earlyMediaPayloads = onBlockReply.mock.calls
-    .map(([payload]) => payload)
-    .filter((payload) => payload.mediaUrls?.length);
+  const earlyMediaPayloads = onBlockReply.mock.calls.filter(
+    ([payload]) => payload.mediaUrls?.length,
+  );
   expect(earlyMediaPayloads).toStrictEqual([]);
   emitAssistantTextDelta(emit, "MEDIA:/tmp/generated.png");
   emitUpdate(
@@ -297,9 +292,9 @@ it("does not attach generated image media to an early streamed chunk before expl
   emitMessage(emit, "message_end", textAssistant("Generated 1 image.\nMEDIA:/tmp/generated.png"));
   emit({ type: "agent_end" });
   await subscription.waitForPendingEvents();
-  const mediaPayloads = onBlockReply.mock.calls
-    .map(([payload]) => payload)
-    .filter((payload) => payload.mediaUrls?.includes("/tmp/generated.png"));
+  const mediaPayloads = onBlockReply.mock.calls.filter(([payload]) =>
+    payload.mediaUrls?.includes("/tmp/generated.png"),
+  );
   expect(mediaPayloads).toHaveLength(1);
   expect(subscription.hasToolMediaBlockReply()).toBe(true);
 });
@@ -312,11 +307,7 @@ it("does not trust a mixed generated and non-generated pending media batch", asy
       completion("subagent", "/tmp/untrusted.mp3"),
     ],
   });
-  emitMessage(emit, "message_start");
-  emitMessage(emit, "message_end", {
-    role: "assistant",
-    content: [{ type: "text", text: "Done." }],
-  });
+  emitMessageStartAndEndForAssistantText({ emit, text: "Done." });
   emit({ type: "agent_end" });
   await subscription.waitForPendingEvents();
   expectBlockReplyPayload(onBlockReply, {

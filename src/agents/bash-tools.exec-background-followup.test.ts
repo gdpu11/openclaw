@@ -72,6 +72,11 @@ let state: OpenClawTestState;
 let config: OpenClawConfig;
 const receipts: sessionEvents.SessionEventReceipt[] = [];
 const enqueue = sessionEvents.enqueueSessionEventForHost;
+function enqueueTracked(...args: Parameters<typeof enqueue>) {
+  const receipt = enqueue(...args);
+  receipts.push(receipt);
+  return receipt;
+}
 
 beforeAll(async () => {
   const { default: autoreview } = await loadBundledPluginFacade<{
@@ -103,11 +108,7 @@ beforeEach(() => {
     await admitModelTurn(params);
     return { payloads: [{ text: "NO_REPLY" }], meta: { durationMs: 1 } };
   });
-  vi.spyOn(sessionEvents, "enqueueSessionEventForHost").mockImplementation((text, options) => {
-    const receipt = enqueue(text, options);
-    receipts.push(receipt);
-    return receipt;
-  });
+  vi.spyOn(sessionEvents, "enqueueSessionEventForHost").mockImplementation(enqueueTracked);
 });
 
 afterEach(async () => {
@@ -164,6 +165,14 @@ function backgroundExec(sessionKey: string, overrides: ExecToolDefaults = {}) {
     });
 }
 
+function collectProcess(tool: ReturnType<typeof createProcessTool>, sessionId: string) {
+  return tool.execute("collect", { action: "poll", sessionId });
+}
+
+function expectTextContent(result: { content: unknown }, text: string) {
+  expect(result.content).toContainEqual({ type: "text", text: expect.stringContaining(text) });
+}
+
 test.each([
   { label: "explicit background", args: { background: true } },
   { label: "elapsed yield window", args: { yieldMs: 10 } },
@@ -192,11 +201,8 @@ test.each([
   try {
     const requestedAt = Date.now();
     const started = await exec.execute("followup-start", { command, ...args });
-    expect(started.details.status).toBe("running");
-    if (started.details.status !== "running") {
-      throw new Error("Expected a background process handle");
-    }
-    const deadlineAtMs = started.details.deadlineAtMs;
+    const handle = runningSession(started.details);
+    const deadlineAtMs = handle.deadlineAtMs;
     if (args.timeoutSeconds === 0) {
       expect(deadlineAtMs).toBeUndefined();
       expect(started.details.followUp).not.toContain("Automatic stop will be requested");
@@ -206,28 +212,16 @@ test.each([
       }
       expect(deadlineAtMs).toBeGreaterThanOrEqual(requestedAt + 4_999);
       expect(deadlineAtMs).toBeLessThanOrEqual(Date.now() + 5_001);
-      expect(started.content).toContainEqual({
-        type: "text",
-        text: expect.stringContaining(new Date(deadlineAtMs).toISOString()),
-      });
+      expectTextContent(started, new Date(deadlineAtMs).toISOString());
     }
     expect(started.details).toMatchObject({ followUp: expect.stringContaining("Use process") });
-    const followUp = started.details.followUp;
+    const followUp = expectDefined(handle.followUp, "structured follow-up route");
     expect(followUp).toContain("poll");
-    if (!followUp) {
-      throw new Error("Expected a structured follow-up route");
-    }
-    expect(started.content).toContainEqual({
-      type: "text",
-      text: expect.stringContaining(followUp),
-    });
+    expectTextContent(started, followUp);
 
     await fs.writeFile(releasePath, "release");
     await waitForExecScope(scopeKey);
-    const completed = await processTool.execute("followup-poll", {
-      action: "poll",
-      sessionId: started.details.sessionId,
-    });
+    const completed = await collectProcess(processTool, handle.sessionId);
     expect(completed.details).toMatchObject({
       status: "completed",
       sessionId: started.details.sessionId,
@@ -291,8 +285,7 @@ test.for(["ordinary", "live cron", "queued cron", "ended cron", "cron ended duri
       if (scenario === "ended cron") {
         release();
       }
-      const receipt = enqueue(text, options);
-      receipts.push(receipt);
+      const receipt = enqueueTracked(text, options);
       if (scenario === "cron ended during admission") {
         release();
       }
@@ -431,10 +424,7 @@ test("starts and notifies when identity enrichment fails, then resolves child id
     }
     expect(receipts).toHaveLength(1);
     expect(model).toHaveBeenCalledOnce();
-    const result = await processTool.execute("collect", {
-      action: "poll",
-      sessionId,
-    });
+    const result = await collectProcess(processTool, sessionId);
     expectCompleted(result.details, "EXEC_STARTED", 1);
   }
 });
@@ -478,10 +468,7 @@ test("reports manual collection after destination capture fails, then recovers o
       if (!recovered) {
         expect(followUp).not.toContain("wake this conversation automatically");
       }
-      expect(started.content).toContainEqual({
-        type: "text",
-        text: expect.stringContaining(followUp),
-      });
+      expectTextContent(started, followUp);
       for (const action of ["list", "poll", "log"] as const) {
         const running = await processTool.execute("inspect", {
           action,
@@ -504,10 +491,7 @@ test("reports manual collection after destination capture fails, then recovers o
       }
       expect(receipts).toHaveLength(recovered ? 1 : 0);
       expect(model).toHaveBeenCalledTimes(recovered ? 1 : 0);
-      const collected = await processTool.execute("collect", {
-        action: "poll",
-        sessionId: handle.sessionId,
-      });
+      const collected = await collectProcess(processTool, handle.sessionId);
       expectCompleted(collected.details, "EXEC_COLLECTED");
     } finally {
       await fs.writeFile(release, "release");
@@ -562,12 +546,7 @@ test.for(["completed", "revoked", "missing"] as const)(
     ).resolves.toBe("mock-openai/admin-only");
     const enqueueFromAdmin = await withGatewayToolCallerIdentity(
       { agentId: "main", sessionKey, operatorAuthority: admin },
-      () =>
-        AsyncLocalStorage.bind((...args: Parameters<typeof enqueue>) => {
-          const receipt = enqueue(...args);
-          receipts.push(receipt);
-          return receipt;
-        }),
+      () => AsyncLocalStorage.bind(enqueueTracked),
     );
     vi.mocked(sessionEvents.enqueueSessionEventForHost).mockImplementation(enqueueFromAdmin);
     const constructReview = (capabilities: PluginToolExecutionCapabilities) =>
