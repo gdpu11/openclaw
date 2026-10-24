@@ -35,12 +35,11 @@ export function createChatMessageHarness() {
 
   const renderStreamingMarkdown = markdown.toStreamingMarkdownDomParts;
 
-  const markdownRenderMock = vi.fn((value: string) => value);
+  const markdownRenderMock = vi.fn<typeof markdown.toMarkdownContent>((value) => value);
 
-  const streamingMarkdownRenderMock = vi.fn((value: string): [string, string] => [
-    "",
-    `<div class="streaming-markdown">${value}</div>`,
-  ]);
+  const streamingMarkdownRenderMock = vi.fn<typeof markdown.toStreamingMarkdownDomParts>(
+    (value) => ["", `<div class="streaming-markdown">${value}</div>`],
+  );
 
   const messageMounts = new Map<
     HTMLElement,
