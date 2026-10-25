@@ -56,7 +56,10 @@ const INTERNAL_TRACE_HEAD_RE = new RegExp(
  * Minimax sometimes embeds tool calls as XML in text blocks instead of
  * proper structured tool calls.
  */
-export function stripMinimaxToolCallXml(text: string): string {
+export function stripMinimaxToolCallXml(
+  text: string,
+  options?: { recoverUnclosed?: boolean },
+): string {
   const encodedTransportBoundaryRe = /\]?<\]minimax\[>\[/g;
   const encodedToolCallOpenRe = /\]?<\]minimax\[>\[<tool_call>/g;
   const encodedToolCallCloseRe = /\]?<\]minimax\[>\[<\/tool_call>/g;
@@ -121,11 +124,16 @@ export function stripMinimaxToolCallXml(text: string): string {
       const closeRe = /<\/invoke>/gi;
       closeRe.lastIndex = tag.end;
       let close = closeRe.exec(normalized);
+      const recoveryClose = close;
       while (
         close &&
         (isInsideQuote ? isInsideQuote(close.index) : isInsideCode(close.index, codeRegions))
       ) {
         close = closeRe.exec(normalized);
+      }
+      // Only terminal text can recover the legacy boundary when no unquoted close remains.
+      if (!close && isInsideQuote && options?.recoverUnclosed !== false) {
+        close = recoveryClose;
       }
       if (!close) {
         continue;
