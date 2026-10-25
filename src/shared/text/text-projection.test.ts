@@ -108,6 +108,8 @@ it.each([
   ["A\n\nA\n\n \n\nB", "A\n\n\n\nB"],
   ["\0\0\0\n\nA\n\nA\n\n`x`\0`y` `x`", "\0\0\0\n\nA\n\n`x`\0`y` `x`"],
   ["A\n\nA `x`", "A\n\nA `x`"],
+  ["A\n\nA\n\n```text\ninside\n\ninside\n```", "A\n\n```text\ninside\n\ninside\n```"],
+  ["A\n\nA\n\n    code\n\n    code", "A\n\n    code\n\n    code"],
 ])("preserves canonical separators and whitespace %#", (source, expected) => {
   expect(text.duplicateParagraphTextFilter.transform(source)).toBe(expected);
   const partitions = [

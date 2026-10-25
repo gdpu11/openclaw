@@ -51,11 +51,12 @@ const { values } = parseArgs({
     "tool-interval-ms": { type: "string", default: "100" },
     "tool-gc-log": { type: "string" },
     "tool-args-chars": { type: "string", default: "0" },
+    "duplicate-paragraphs": { type: "string", default: "0" },
   },
 });
 if (values.help) {
   console.log(
-    "Usage: node --import ./scripts/tsx.mjs scripts/bench-channel-turn.mts [--entry dist/entry.js] [--tool-args-chars N]\nRuns one cold and ten warmed QA-channel turns with an isolated local mock provider.\nWith --tool-args-chars, each turn first streams a Chat Completions write call carrying N content characters.\nOr use --tool-invocations [--tool-argument-bytes 65536] [--tool-progress-events 500] [--tool-calls 200] [--tool-samples 5] [--tool-interval-ms 100] --tool-gc-log <stdout-log> with --expose-gc --trace-gc-nvp, redirecting stdout to that log, for real tool-owner allocation, promotion, GC and latency measurements without a Gateway.",
+    "Usage: node --import ./scripts/tsx.mjs scripts/bench-channel-turn.mts [--entry dist/entry.js] [--tool-args-chars N] [--duplicate-paragraphs N]\nRuns one cold and ten warmed QA-channel turns with an isolated local mock provider.\nWith --tool-args-chars, each turn first streams a Chat Completions write call carrying N content characters.\nWith --duplicate-paragraphs, each turn streams a repeated opening and N distinct paragraphs in four-character Responses deltas.\nOr use --tool-invocations [--tool-argument-bytes 65536] [--tool-progress-events 500] [--tool-calls 200] [--tool-samples 5] [--tool-interval-ms 100] --tool-gc-log <stdout-log> with --expose-gc --trace-gc-nvp, redirecting stdout to that log, for real tool-owner allocation, promotion, GC and latency measurements without a Gateway.",
   );
   process.exit(0);
 }
@@ -68,6 +69,23 @@ if (!Number.isSafeInteger(toolArgsChars) || toolArgsChars < 0) {
   console.error("--tool-args-chars must be a non-negative integer");
   process.exit(2);
 }
+const duplicateParagraphs = Number(values["duplicate-paragraphs"]);
+if (!Number.isSafeInteger(duplicateParagraphs) || duplicateParagraphs < 0) {
+  throw new Error("--duplicate-paragraphs must be a non-negative integer");
+}
+if (duplicateParagraphs > 0 && toolArgsChars > 0) {
+  throw new Error("--duplicate-paragraphs and --tool-args-chars use different provider APIs");
+}
+const isolatedTurns = toolArgsChars > 0 || duplicateParagraphs > 0;
+const opening = "The service is ready.";
+const paragraphReply = [
+  opening,
+  ...Array.from(
+    { length: duplicateParagraphs },
+    (_, index) =>
+      `Paragraph ${String(index).padStart(4, "0")}: this service returns an ordinary explanatory sentence without code.`,
+  ),
+].join("\n\n");
 // Brace-dense TypeScript, like a coding agent writing a source file.
 const toolCallSource = readFileSync(new URL(import.meta.url), "utf8");
 const toolCallContent = toolCallSource
@@ -92,6 +110,7 @@ const evidence: {
   output: string;
   harnessVersion: string;
   toolArgsChars: number;
+  duplicateParagraphs: number;
   phases: { phase: string; start: number; end: number }[];
   turns: TurnEvidence[];
   children: { name: string; pid: number }[];
@@ -106,6 +125,7 @@ const evidence: {
   output,
   harnessVersion: "2.0.0-channel.1",
   toolArgsChars,
+  duplicateParagraphs,
   phases: [],
   turns: [],
   children: [],
@@ -205,7 +225,9 @@ try {
       model.api = "openai-completions";
     }
     cfg.models = { ...cfg.models, providers: { "mock-completions": mockProvider } };
-    // One session per turn keeps large tool-call histories below the context window.
+  }
+  if (isolatedTurns) {
+    // One session per turn keeps large provider replies below the context window.
     cfg.session = { dmScope: "per-peer" };
   }
   cfg.agents = {
@@ -264,7 +286,9 @@ try {
       ...(values["cpu-profile"] ? ["--cpu-prof", `--cpu-prof-dir=${output}`] : []),
     ]),
     {
-      ...createGatewayBenchEnv(fixture, configPath, { caseEnv: {} }),
+      ...createGatewayBenchEnv(fixture, configPath, {
+        caseEnv: { OPENCLAW_ENABLE_PRIVATE_QA_CLI: "1" },
+      }),
       OPENAI_API_KEY: "synthetic-sqlmeasure-fixture",
       SQLMEASURE_OUT: output,
       NODE_OPTIONS: process.env.OPENCLAW_CHANNEL_BENCH_NODE_OPTIONS ?? "--enable-source-maps",
@@ -305,10 +329,50 @@ try {
     messages[messageId] = { phase, turnId };
     publish("trace-map.json", traces);
     publish("channel-turns.json", messages);
-    const reply = `Synthetic channel measurement response ${i}. The Gateway receives this streamed answer from the local mock provider and delivers it to the isolated QA bus.`;
+    const reply =
+      duplicateParagraphs > 0
+        ? paragraphReply
+        : `Synthetic channel measurement response ${i}. The Gateway receives this streamed answer from the local mock provider and delivers it to the isolated QA bus.`;
+    const providerReply = `${opening}\n\n${reply}`;
+    const item = {
+      id: "msg_duplicate_paragraphs",
+      type: "message",
+      role: "assistant",
+      phase: "final_answer",
+      status: "completed",
+      content: [{ type: "output_text", text: providerReply, annotations: [] }],
+    };
     publish("mock-control.json", {
       text: reply,
       chunkDelayMs: 5,
+      ...(duplicateParagraphs > 0
+        ? {
+            events: [
+              {
+                type: "response.output_item.added",
+                output_index: 0,
+                item: { ...item, status: "in_progress", content: [] },
+              },
+              ...Array.from({ length: Math.ceil(providerReply.length / 4) }, (_, index) => ({
+                type: "response.output_text.delta",
+                item_id: item.id,
+                output_index: 0,
+                content_index: 0,
+                delta: providerReply.slice(index * 4, index * 4 + 4),
+              })),
+              { type: "response.output_item.done", output_index: 0, item },
+              {
+                type: "response.completed",
+                response: {
+                  id: "resp_duplicate_paragraphs",
+                  status: "completed",
+                  output: [item],
+                  usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+                },
+              },
+            ],
+          }
+        : {}),
       ...(toolArgsChars > 0
         ? {
             toolCall: {
@@ -319,7 +383,7 @@ try {
           }
         : {}),
     });
-    const peer = toolArgsChars > 0 ? `sqlmeasure-peer-${i}` : "sqlmeasure-peer";
+    const peer = isolatedTurns ? `sqlmeasure-peer-${i}` : "sqlmeasure-peer";
     const start = Date.now();
     const cursor = state.getSnapshot().cursor;
     const firstOutbound = state
@@ -334,7 +398,7 @@ try {
       {
         accountId: "default",
         conversation: { kind: "direct", id: peer },
-        senderId: toolArgsChars > 0 ? `sqlmeasure-user-${i}` : "sqlmeasure-user",
+        senderId: isolatedTurns ? `sqlmeasure-user-${i}` : "sqlmeasure-user",
         senderName: "SQL measurement",
         text: `Please give a short synthetic status report for measurement turn ${i}.`,
         timestamp: 1800000000000 + i,
@@ -342,12 +406,16 @@ try {
       messageId,
     );
     const inboundCursor = state.getSnapshot().cursor;
-    await state.waitFor({
-      kind: "message-text",
-      direction: "outbound",
-      textIncludes: reply,
-      timeoutMs: 180000,
-    });
+    await state.waitForCursorAdvance(inboundCursor, 180000, (snapshot) =>
+      snapshot.messages.some(
+        (message) =>
+          message.direction === "outbound" &&
+          message.replyToId === messageId &&
+          message.text === reply &&
+          !message.deleted &&
+          !message.isError,
+      ),
+    );
     const finalOutboundMs = Date.now() - start;
     const firstOutboundMs = await firstOutbound;
     // The poll acknowledgement follows dispatch, preview cleanup and receipt settlement.

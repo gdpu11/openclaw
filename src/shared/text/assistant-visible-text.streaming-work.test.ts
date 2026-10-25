@@ -13,6 +13,10 @@ vi.mock("./code-regions.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./code-regions.js")>();
   return {
     ...actual,
+    findCodeRegions(text: string) {
+      markdownOwnershipWork.scannedCharacters += text.length;
+      return actual.findCodeRegions(text);
+    },
     findCodeOwnership(
       text: Parameters<typeof actual.findCodeOwnership>[0],
       options?: Parameters<typeof actual.findCodeOwnership>[1],
@@ -95,7 +99,20 @@ it("bounds classification work while invisible text streams", () => {
   expect(stream.replace("\u2060")).toEqual({ text: "", delta: null });
 });
 
-it("bounds Markdown ownership work for open tool calls and cited answers", () => {
+it("bounds Markdown ownership work for open tool calls, cited answers, and duplicate paragraphs", () => {
+  const paragraphs = Array.from(
+    { length: 128 },
+    (_, index) => `Paragraph ${index}: an ordinary explanatory sentence without code.`,
+  );
+  const duplicateAnswer = ["Ready.", "Ready.", ...paragraphs].join("\n\n");
+  const duplicateStream = createAssistantVisibleStreamText("final_answer");
+  markdownOwnershipWork.scannedCharacters = 0;
+  for (let offset = 0; offset < duplicateAnswer.length; offset += 4) {
+    duplicateStream.append(duplicateAnswer.slice(offset, offset + 4));
+  }
+  expect(duplicateStream.text).toBe(["Ready.", ...paragraphs].join("\n\n"));
+  expect(markdownOwnershipWork.scannedCharacters).toBeLessThan(duplicateAnswer.length * 16);
+
   const payload = "x".repeat(4_096);
   const openCall = `[tool:write]\n{"path": "notes.txt", "content": "${payload}`;
   const openCallStream = createTextProjection(assistantVisibleTextFilters("delivery", true));
