@@ -9,6 +9,9 @@ import type { ControlUiSessionTaskPullRequest } from "./control-ui-contract.js";
 import { SessionRowFactsPending } from "./session-row-prepared-read.js";
 import { hasEntry, type EntryRow, type Lookup, type Row } from "./session-row-projection-record.js";
 import type { SessionRowProjection } from "./session-row-projection.js";
+import type { createSessionListEntryFilter } from "./session-sharing.js";
+
+type PublicationFilter = ReturnType<typeof createSessionListEntryFilter>;
 
 type PublicationNode = {
   query: Lookup;
@@ -42,21 +45,21 @@ function readPublicationRow(
   return row;
 }
 
-function allowsPublicationRow(
-  row: Row | undefined,
-  allows: (row: EntryRow) => boolean,
-): row is EntryRow {
-  return hasEntry(row) && !row.entry.incognito && !isIncognitoSessionKey(row.key) && allows(row);
+function allowsPublicationRow(row: Row | undefined, allows: PublicationFilter): row is EntryRow {
+  return (
+    hasEntry(row) &&
+    !row.entry.incognito &&
+    !isIncognitoSessionKey(row.key) &&
+    allows?.(row.key, row.entry) !== false
+  );
 }
 
 /** Traverse the row owner's indexed lineage; neither checkout nor transcript is evidence. */
 function selectTaskPublicationSessions(
   projection: SessionRowProjection,
   root: PublicationRow,
-  allows: (row: EntryRow) => boolean,
+  allows: PublicationFilter,
 ) {
-  // Registry publications can defer parent-index updates until row preparation.
-  void projection.state;
   const revision = projection.readTaskPublicationRevision();
   const nodes = getOrCreateWeakOwnerMap(nodesByRevision, revision);
   const sharing = projection.sharingRevision;
@@ -107,16 +110,19 @@ function selectTaskPublicationSessions(
 export function prepareTaskPublicationSessions(
   projection: SessionRowProjection,
   root: PublicationRow,
-  getAllows: () => (row: EntryRow) => boolean,
+  getAllows: () => PublicationFilter,
 ) {
-  let prepared = selectTaskPublicationSessions(projection, root, getAllows());
+  // Registry publications can defer parent-index updates until row preparation.
+  const initialAllows = getAllows();
+  void projection.state;
+  let prepared = selectTaskPublicationSessions(projection, root, initialAllows);
   const sessions = prepared.sessions;
   return {
     sessions,
     assertCurrent: () => {
       // Registry publication can defer the lineage update until preparation.
-      void projection.state;
       const allows = getAllows();
+      void projection.state;
       if (prepared.revision === projection.readTaskPublicationRevision()) {
         const sharing = projection.sharingRevision;
         const rows = sharing ? getOrCreateWeakOwnerMap(rowsByRevision, sharing) : undefined;

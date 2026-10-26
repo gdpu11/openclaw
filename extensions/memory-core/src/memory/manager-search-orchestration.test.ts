@@ -16,14 +16,26 @@ import {
   holdMemoryTestOperation as hold,
 } from "./manager-index.test-support.js";
 
-const { closeAllMemorySearchManagers, getMemorySearchManager } = await import("./index.js");
+const memoryWarnings = vi.hoisted(() => vi.fn());
+vi.mock("openclaw/plugin-sdk/memory-core-host-engine-foundation", async (original) => {
+  const actual =
+    await original<typeof import("openclaw/plugin-sdk/memory-core-host-engine-foundation")>();
+  return {
+    ...actual,
+    createSubsystemLogger: (...args: Parameters<typeof actual.createSubsystemLogger>) => {
+      const logger = actual.createSubsystemLogger(...args);
+      return args[0] === "memory"
+        ? { ...logger, warn: (...warnArgs: unknown[]) => void memoryWarnings(...warnArgs) }
+        : logger;
+    },
+  };
+});
+
+const memory = await import("./index.js");
 const { MemoryIndexManager } = await import("./manager.js");
 
 describe("memory index", () => {
-  const fixture = createManagerIndexFixture({
-    getMemorySearchManager,
-    closeAllMemorySearchManagers,
-  });
+  const fixture = createManagerIndexFixture(memory);
   const { provider: providerFixture } = fixture;
   const {
     createConfig: createCfg,
@@ -57,8 +69,11 @@ describe("memory index", () => {
     providerFixture.forceNoProvider = true;
     return createCfg({ provider: "none", minScore: 0, ...options });
   }
-  const matchingHit = (fields = { path: "memory/2026-01-12.md" }) =>
-    expect.arrayContaining([expect.objectContaining(fields)]);
+  const matchingHit = (
+    fields: Partial<Awaited<ReturnType<Manager["search"]>>[number]> = {
+      path: "memory/2026-01-12.md",
+    },
+  ) => expect.arrayContaining([expect.objectContaining(fields)]);
   function expectFixtureHit(results: Awaited<ReturnType<Manager["search"]>>) {
     expect(results).toEqual(matchingHit());
   }
@@ -98,6 +113,11 @@ describe("memory index", () => {
     });
     return { ready: operation.entered, release: operation.release, state, spy };
   }
+  const awaitIdle = (manager: Manager) => serving(manager).awaitManagerIdle();
+  const searchSync = (manager: Manager) =>
+    serving(manager).syncPublishedIndexInBackground({ reason: "search" });
+  const writeMemory = (name: string, content: string) =>
+    fs.writeFile(path.join(fixture.paths.memory, name), content);
 
   it("reuses published facts across searches and observes the next publication", async () => {
     const manager = await getPersistentManager(keywordConfig());
@@ -164,6 +184,24 @@ describe("memory index", () => {
 
     query.mockRestore();
     expectFixtureHit(await manager.search("alpha"));
+  });
+
+  // #183425: an all-zero query embedding skips vector recall; that must be visible
+  // in the Gateway log instead of silently returning keyword-only results.
+  it("warns when the query embedding is all zeros and keeps keyword results", async () => {
+    const manager = await syncedManager({ provider: "openai", minScore: 0 }, true);
+    const query = vi.spyOn(provider(manager), "embed").mockResolvedValue([0, 0, 0, 0]);
+    memoryWarnings.mockClear();
+
+    expectFixtureHit(await manager.search("alpha"));
+    expect(memoryWarnings.mock.calls.map((call) => String(call[0]))).toEqual([
+      "memory search: query embedding from mock is all zeros; vector recall skipped; check the embedding service and retry",
+    ]);
+
+    query.mockRestore();
+    memoryWarnings.mockClear();
+    expectFixtureHit(await manager.search("alpha"));
+    expect(memoryWarnings).not.toHaveBeenCalled();
   });
 
   it("keeps configured provider fallback available after query dimension drift", async () => {
@@ -327,17 +365,13 @@ describe("memory index", () => {
     const manager = await syncedManager({ minScore: 0, vectorEnabled: false });
 
     const insertChunk = openOpenClawAgentDatabase({ agentId: "main" }).db.prepare(
-      "INSERT INTO memory_index_chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO memory_index_chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at) VALUES (?, ?, 'memory', 1, 1, ?, 'mock-embed', ?, ?, ?)",
     );
     for (let index = 0; index < 4096; index += 1) {
       insertChunk.run(
         `cancel-scan-${index}`,
         `memory/cancel-scan-${index}.md`,
-        "memory",
-        1,
-        1,
         `cancel-scan-hash-${index}`,
-        "mock-embed",
         `fallback scan row ${index}`,
         encodeMemoryEmbedding([0, 1, 0, 0]),
         index,
@@ -475,7 +509,7 @@ describe("memory index", () => {
     const searchCurrent = () =>
       manager.search("current dirty search sync", { maxResults: 5, minScore: 0 });
     const content = "Current memory appears only after the dirty search sync.";
-    await fs.writeFile(path.join(fixture.paths.memory, "search-sync.md"), content);
+    await writeMemory("search-sync.md", content);
     markDirty(manager);
     const maintenance = pauseMaintenance(true);
 
@@ -489,18 +523,16 @@ describe("memory index", () => {
       await expect(searchCurrent()).resolves.toEqual([]);
 
       maintenance.release();
-      await serving(manager).awaitManagerIdle();
+      await awaitIdle(manager);
       expect(manager.status().dirty).toBe(false);
 
       expect(await searchCurrent()).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ source: "memory", snippet: expect.stringContaining(content) }),
-        ]),
+        matchingHit({ source: "memory", snippet: expect.stringContaining(content) }),
       );
       expect(maintenance.state.closed).toBe(true);
     } finally {
       maintenance.release();
-      await serving(manager).awaitManagerIdle();
+      await awaitIdle(manager);
       maintenance.spy.mockRestore();
     }
   });
@@ -551,7 +583,7 @@ describe("memory index", () => {
       releasePublish.resolve();
 
       expectFixtureHit(await search);
-      await serving(manager).awaitManagerIdle();
+      await awaitIdle(manager);
       expect(manager.status()).toMatchObject({ dirty: false, lastSyncError: undefined });
       expect(syncCalls).toBe(2);
       expect(await fs.readFile(memoryPath, "utf8")).not.toContain("Private violet");
@@ -563,7 +595,7 @@ describe("memory index", () => {
       ).toEqual([]);
     } finally {
       releasePublish.resolve();
-      await serving(manager).awaitManagerIdle();
+      await awaitIdle(manager);
       getSpy.mockRestore();
     }
   });
@@ -573,10 +605,7 @@ describe("memory index", () => {
     const initialManager = await getFreshManager(cfg, "cli");
     await initialManager.sync({ reason: "test", force: true });
     await initialManager.close?.();
-    await fs.writeFile(
-      path.join(fixture.paths.memory, "cli-refresh.md"),
-      "Content published after transient CLI maintenance.",
-    );
+    await writeMemory("cli-refresh.md", "Content published after transient CLI maintenance.");
 
     const manager = await getFreshManager(cfg, "cli", true);
     const servingFields = manager as unknown as MaintenanceFields;
@@ -584,11 +613,11 @@ describe("memory index", () => {
     let closePromise: Promise<void> | undefined;
     const maintenance = pauseMaintenance();
     const idleEntered = createDeferred<void>();
-    const awaitIdle = serving(manager).awaitManagerIdle.bind(manager);
+    const awaitManagerIdle = serving(manager).awaitManagerIdle.bind(manager);
     const idleSettled = vi.fn();
     using idle = vi.spyOn(serving(manager), "awaitManagerIdle");
     idle.mockImplementation(() => {
-      const pending = awaitIdle();
+      const pending = awaitManagerIdle();
       void pending.then(idleSettled, idleSettled);
       idleEntered.resolve();
       return pending;
@@ -647,7 +676,7 @@ describe("memory index", () => {
     };
     const getSpy = vi.spyOn(MemoryIndexManager, "get").mockResolvedValue(maintenance as never);
     Reflect.set(manager, "dirty", true);
-    const detachedSync = serving(manager).syncPublishedIndexInBackground({ reason: "search" });
+    const detachedSync = searchSync(manager);
 
     try {
       await maintenanceWork.entered;
@@ -672,10 +701,7 @@ describe("memory index", () => {
 
   it("restores a maintenance generation when a null fallback leaves it dirty", async () => {
     const manager = await syncedManager({ fallback: "fallback-provider", minScore: 0 }, true);
-    await fs.writeFile(
-      path.join(fixture.paths.memory, "null-fallback.md"),
-      "New content that requires a fallback embedding.",
-    );
+    await writeMemory("null-fallback.md", "New content that requires a fallback embedding.");
     markDirty(manager);
     providerFixture.providerNullResult = "fallback-provider";
     const getSpy = interceptMaintenance(async (acquired) => {
@@ -693,9 +719,7 @@ describe("memory index", () => {
     });
 
     try {
-      await expect(
-        serving(manager).syncPublishedIndexInBackground({ reason: "search" }),
-      ).resolves.toBeUndefined();
+      await expect(searchSync(manager)).resolves.toBeUndefined();
 
       expect(manager.status()).toMatchObject({
         dirty: true,

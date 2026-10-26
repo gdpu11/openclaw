@@ -20,6 +20,9 @@ openclaw gateway restart
 openclaw gateway uninstall
 ```
 
+Queued native service commands use elapsed-time deadlines, so system-clock
+corrections do not prematurely expire or extend their admission budgets.
+
 `gateway stop`, `gateway uninstall`, and `gateway restart` remain available when
 configuration is invalid or needs Doctor migration, including configuration written
 by a newer OpenClaw version. They control the recorded service and report config
@@ -27,6 +30,11 @@ problems as warnings with `openclaw doctor --fix` guidance. Stop and uninstall d
 not rewrite configuration. Restart preserves the installed service definition when
 config needs repair; its health check still reports whether the Gateway came back.
 `gateway start` continues to validate configuration before starting the Gateway.
+
+Restart warns when a recorded managed environment value differs from its
+current durable configuration, naming only affected keys. Run
+`openclaw gateway install --force` to refresh that snapshot. Unrecorded values and
+systemd's runtime managed-environment loading keep their existing precedence.
 
 If a Gateway holds state ownership for more than five minutes without recording
 that its listener bound, `openclaw gateway stop` can recover the stalled startup,
