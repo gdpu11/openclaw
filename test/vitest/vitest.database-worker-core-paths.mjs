@@ -263,7 +263,6 @@ export const databaseWorkerCoreTestFiles = [
   "src/agents/embedded-agent-runner/openrouter-model-capabilities.test.ts",
   "src/auto-reply/reply/commands-system-agent.provider.test.ts",
   "src/auto-reply/reply/commands-status.test.ts",
-  "src/cli/capability-cli/model.account-secrets.provenance.test.ts",
   "src/cli/capability-cli/model.resources.test.ts",
   "src/cli/capability-cli/local-runners.account-secrets.test.ts",
   "src/cli/models-cli.auth-login.integration.test.ts",
