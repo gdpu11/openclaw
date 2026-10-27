@@ -106,7 +106,7 @@ async function withMailbox(
 }
 
 it.each(["expiry", "permanent_failure"] as const)(
-  "admits the failure notice only after %s suspension commits",
+  "suspends %s delivery without admitting a failure notice",
   (reason) =>
     withMailbox(async ({ reserve, block, database }) => {
       const completion = reserve("subagent-completion:completion-run:4");
@@ -124,16 +124,7 @@ it.each(["expiry", "permanent_failure"] as const)(
 
       await expect(block(reason)).resolves.toBe(true);
       expect(subagentRuns.get("completion-run")?.delivery?.status).toBe("suspended");
-      const [notice] = await loadPendingSessionDeliveries(context);
-      expect(notice).toMatchObject({
-        kind: "systemEvent",
-        text: expect.stringContaining("Synthetic terminal delivery failure"),
-      });
-      if (!notice) {
-        throw new Error("Suspension did not retain its failure notice");
-      }
-      const noticeInput = reserve(notice.id);
-      expect(tryClaimSessionControllerTask(noticeInput, "queued_followup")).toBeDefined();
+      expect(await loadPendingSessionDeliveries(context)).toEqual([]);
     }),
 );
 
@@ -209,6 +200,10 @@ it.each([
   const batchRunIds = ["completion-run", mixed ? "surviving-sibling" : "already-retired-sibling"];
   await withMailbox(
     async ({ entry, inputs, reserve, database }) => {
+      // Cohort custody is restored after child delivery has settled.
+      entry.delivery = { status: "delivered" };
+      entry.cleanupCompletedAt = entry.execution.endedAt;
+      seedSubagentCompletionOwner({ subagent: entry, databaseOptions: { database } });
       const sibling = {
         ...structuredClone(entry),
         runId: "surviving-sibling",

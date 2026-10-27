@@ -43,10 +43,8 @@ import {
   truncateOversizedToolResultsInMessages,
 } from "../tool-result-truncation.js";
 import { buildEmbeddedAgentHookContext } from "./agent-hook-context.js";
-import {
-  evaluateAttemptDecisionToolPrefilter,
-  type DecisionPrefilterResult,
-} from "./attempt-decision-prefilter.js";
+import type { DecisionPrefilterResult } from "./attempt-decision-prefilter-policy.js";
+import { evaluateAttemptDecisionToolPrefilter } from "./attempt-decision-prefilter.js";
 import {
   normalizeCurrentPromptTextForLlmBoundary,
   usesEscapedRuntimeContext,
@@ -91,7 +89,8 @@ export async function prepareEmbeddedAttemptPromptAssembly(input: {
   isRawModelRun: boolean;
   orphanRepair?: OrphanRepairPlan;
   sessionAgentId: string;
-  runtimeModel: string;
+  /** Absent for a blind child, whose prompt never names its own model. */
+  runtimeModel?: string;
   systemPromptText: string;
   runAbortSignal?: AbortSignal;
   hasBaselineTools: () => boolean;
@@ -151,15 +150,20 @@ export async function prepareEmbeddedAttemptPromptAssembly(input: {
     inputProvenance: attempt.inputProvenance,
   };
   const promptBuildMessages = input.activeSession.messages;
-  const promptEvent = { prompt: effectivePrompt, messages: promptBuildMessages };
+  // A reload continuation's prompt is synthetic; prompt hooks see the user's request.
+  const promptEvent = {
+    prompt: attempt.pluginRuntimeRefreshUserPrompt ?? effectivePrompt,
+    messages: promptBuildMessages,
+  };
   const hookResult = preserveExactPrompt
     ? undefined
     : await resolvePromptBuildHookResult({
         config: attempt.config ?? getRuntimeConfig(),
-        prompt: effectivePrompt,
+        prompt: promptEvent.prompt,
         messages: promptBuildMessages,
         hookCtx,
         hookRunner: input.hookRunner,
+        refreshContinuation: attempt.pluginRuntimeRefreshUserPrompt !== undefined,
       });
 
   const assertAdmittedActive = resolveAdmittedRunActiveAssertion(
@@ -390,6 +394,7 @@ export async function prepareEmbeddedAttemptPromptContext(input: {
   prompt: PromptAssemblyContext;
   replaceSessionMessages: (messages: AgentMessage[]) => void;
   sessionAgentId: string;
+  systemPromptRuntimeContextFragments?: readonly RuntimeContextFragment[];
   systemPromptReport?: SessionSystemPromptReport;
   systemPromptText: string;
   toolResultPromptProjectionState: ToolResultPromptProjectionState;
@@ -463,6 +468,7 @@ export async function prepareEmbeddedAttemptPromptContext(input: {
     }),
     ...buildAgentInternalEventContext(attempt.internalEvents),
     ...(attempt.runtimeContextFragments ?? []),
+    ...(input.systemPromptRuntimeContextFragments ?? []),
     ...(input.prompt.originContext
       ? escapedProjection
         ? input.prompt.originContext.fragments
